@@ -1,0 +1,30 @@
+#pragma code_page(65001)
+#include <windows.h>
+1 RT_MANIFEST "scaping.manifest"
+1 VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "041004B0"
+  BEGIN
+   VALUE "CompanyName", "Scaping Development"
+   VALUE "FileDescription", "Scaping — monitoraggio ICMP e inventario porte"
+   VALUE "FileVersion", "1.0.0"
+   VALUE "InternalName", "scaping"
+   VALUE "OriginalFilename", "scaping.exe"
+   VALUE "ProductName", "Scaping"
+   VALUE "ProductVersion", "1.0.0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x410, 1200
+ END
+END

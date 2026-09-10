@@ -133,16 +133,17 @@ bool valid_ipv4(std::wstring_view ip) {
 }
 
 std::optional<std::wstring> validate_config(const Config& c, bool allowEmptyIp) {
-    if (!(allowEmptyIp && c.ip.empty()) && !valid_ipv4(c.ip)) return L"Inserire un IPv4 numerico valido (esempio: 192.0.2.1), senza spazi, zeri iniziali, URL o liste.";
-    if (c.intervalMs < 250 || c.intervalMs > 60000) return L"L'intervallo deve essere compreso tra 250 e 60000 ms.";
-    if (c.timeoutMs < 100 || c.timeoutMs > 60000) return L"Il timeout deve essere compreso tra 100 e 60000 ms.";
-    if (!c.slowMs || c.slowMs >= c.timeoutMs) return L"La soglia ping lento deve essere positiva e inferiore al timeout.";
-    if (!c.concurrency || c.concurrency > 256) return L"La concorrenza deve essere compresa tra 1 e 256.";
-    if (!c.connectionsPerSecond || c.connectionsPerSecond > 1024) return L"La velocita deve essere compresa tra 1 e 1024 connessioni al secondo.";
+    if (c.language != Language::Italian && c.language != Language::English) return tr(L"Lingua non supportata.", L"Unsupported language.");
+    if (!(allowEmptyIp && c.ip.empty()) && !valid_ipv4(c.ip)) return tr(L"Inserire un IPv4 numerico valido (esempio: 192.0.2.1), senza spazi, zeri iniziali, URL o liste.", L"Enter a valid numeric IPv4 address (for example, 192.0.2.1), without spaces, leading zeros, URLs or lists.");
+    if (c.intervalMs < 250 || c.intervalMs > 60000) return tr(L"L'intervallo deve essere compreso tra 250 e 60000 ms.", L"The interval must be between 250 and 60000 ms.");
+    if (c.timeoutMs < 100 || c.timeoutMs > 60000) return tr(L"Il timeout deve essere compreso tra 100 e 60000 ms.", L"The timeout must be between 100 and 60000 ms.");
+    if (!c.slowMs || c.slowMs >= c.timeoutMs) return tr(L"La soglia ping lento deve essere positiva e inferiore al timeout.", L"The slow ping threshold must be positive and lower than the timeout.");
+    if (!c.concurrency || c.concurrency > 256) return tr(L"La concorrenza deve essere compresa tra 1 e 256.", L"Concurrency must be between 1 and 256.");
+    if (!c.connectionsPerSecond || c.connectionsPerSecond > 1024) return tr(L"La velocita deve essere compresa tra 1 e 1024 connessioni al secondo.", L"The rate must be between 1 and 1024 connections per second.");
     if (!c.nmapPath.empty()) {
-        if (c.nmapPath.size() > 32700 || c.nmapPath.find_first_of(L"\r\n\t\"<>|") != std::wstring::npos || c.nmapPath.find(L'\0') != std::wstring::npos) return L"Il percorso Nmap contiene caratteri non validi.";
+        if (c.nmapPath.size() > 32700 || c.nmapPath.find_first_of(L"\r\n\t\"<>|") != std::wstring::npos || c.nmapPath.find(L'\0') != std::wstring::npos) return tr(L"Il percorso Nmap contiene caratteri non validi.", L"The Nmap path contains invalid characters.");
         const std::filesystem::path path(c.nmapPath);
-        if (!path.is_absolute() || c.nmapPath.starts_with(L"\\\\") || path.filename().empty() || _wcsicmp(path.filename().c_str(), L"nmap.exe") != 0) return L"Il percorso Nmap deve essere locale, assoluto e indicare nmap.exe.";
+        if (!path.is_absolute() || c.nmapPath.starts_with(L"\\\\") || path.filename().empty() || _wcsicmp(path.filename().c_str(), L"nmap.exe") != 0) return tr(L"Il percorso Nmap deve essere locale, assoluto e indicare nmap.exe.", L"The Nmap path must be local, absolute and point to nmap.exe.");
     }
     return std::nullopt;
 }
@@ -155,7 +156,7 @@ ConfigLoad load_config(const std::filesystem::path& file) {
     auto bad = [&]() {
         result.config = Config{};
         result.valid = false;
-        result.diagnostic = L"Configurazione non leggibile, corrotta o non supportata: ripristinati i valori iniziali. IP non configurato.";
+        result.diagnostic = tr(L"Configurazione non leggibile, corrotta o non supportata: ripristinati i valori iniziali. IP non configurato.", L"Configuration unreadable, corrupted or unsupported: default settings restored. IP not configured.");
         return result;
     };
     std::string bytes;
@@ -167,7 +168,7 @@ ConfigLoad load_config(const std::filesystem::path& file) {
     std::wstring line;
     bool section = false;
     std::map<std::wstring, std::wstring> values;
-    const std::set<std::wstring> keys{L"version", L"ip", L"interval_ms", L"timeout_ms", L"slow_ms", L"auto_start", L"nmap_path", L"concurrency", L"connections_per_second"};
+    const std::set<std::wstring> keys{L"version", L"ip", L"interval_ms", L"timeout_ms", L"slow_ms", L"auto_start", L"nmap_path", L"concurrency", L"connections_per_second", L"language"};
     while (std::getline(input, line)) {
         line = trim(line);
         if (line.empty() || line.front() == L';' || line.front() == L'#') continue;
@@ -179,8 +180,15 @@ ConfigLoad load_config(const std::filesystem::path& file) {
         auto value = trim(std::wstring_view(line).substr(equal + 1));
         if (!keys.contains(key) || !values.emplace(key, value).second) return bad();
     }
-    if (values.size() != keys.size() || values[L"version"] != L"1") return bad();
+    const bool legacy = values[L"version"] == L"1";
+    if (legacy) {
+        if (values.size() != keys.size() - 1 || values.contains(L"language")) return bad();
+    } else {
+        if (values[L"version"] != L"2" || values.size() != keys.size() || !values.contains(L"language")) return bad();
+        if (values[L"language"] != L"it" && values[L"language"] != L"en") return bad();
+    }
     auto& c = result.config;
+    c.language = !legacy && values[L"language"] == L"en" ? Language::English : Language::Italian;
     c.ip = values[L"ip"];
     c.nmapPath = values[L"nmap_path"];
     if (!number(values[L"interval_ms"], c.intervalMs) || !number(values[L"timeout_ms"], c.timeoutMs) || !number(values[L"slow_ms"], c.slowMs) || !number(values[L"concurrency"], c.concurrency) || !number(values[L"connections_per_second"], c.connectionsPerSecond)) return bad();
@@ -193,16 +201,17 @@ ConfigLoad load_config(const std::filesystem::path& file) {
 bool save_config(const std::filesystem::path& file, const Config& c, std::wstring& error) {
     error.clear();
     if (auto invalid = validate_config(c, true)) { error = *invalid; return false; }
-    if (!file.is_absolute()) { error = L"Il percorso configurazione deve essere assoluto."; return false; }
+    if (!file.is_absolute()) { error = tr(L"Il percorso configurazione deve essere assoluto.", L"The configuration path must be absolute."); return false; }
     std::error_code ec;
     std::filesystem::create_directories(file.parent_path(), ec);
-    if (ec) { error = L"Impossibile creare la cartella di configurazione."; return false; }
+    if (ec) { error = tr(L"Impossibile creare la cartella di configurazione.", L"Cannot create the configuration directory."); return false; }
     std::wostringstream ini;
-    ini << L"[scaping]\r\nversion=1\r\nip=" << c.ip << L"\r\ninterval_ms=" << c.intervalMs << L"\r\ntimeout_ms=" << c.timeoutMs
+    ini << L"[scaping]\r\nversion=2\r\nlanguage=" << (c.language == Language::English ? L"en" : L"it")
+        << L"\r\nip=" << c.ip << L"\r\ninterval_ms=" << c.intervalMs << L"\r\ntimeout_ms=" << c.timeoutMs
         << L"\r\nslow_ms=" << c.slowMs << L"\r\nauto_start=" << (c.autoStart ? 1 : 0) << L"\r\nnmap_path=" << c.nmapPath
         << L"\r\nconcurrency=" << c.concurrency << L"\r\nconnections_per_second=" << c.connectionsPerSecond << L"\r\n";
     auto bytes = to_utf8(ini.str());
-    if (bytes.empty() || bytes.size() > kMaxConfigBytes) { error = L"Configurazione troppo grande o codifica non valida."; return false; }
+    if (bytes.empty() || bytes.size() > kMaxConfigBytes) { error = tr(L"Configurazione troppo grande o codifica non valida.", L"Configuration too large or invalid encoding."); return false; }
     std::filesystem::path temporary;
     bool written = false;
     for (unsigned attempt = 0; attempt < 32 && !written; ++attempt) {
@@ -210,19 +219,19 @@ bool save_config(const std::filesystem::path& file, const Config& c, std::wstrin
         Handle handle{CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
         if (handle.value == INVALID_HANDLE_VALUE) {
             if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS) continue;
-            error = L"Impossibile creare il file temporaneo di configurazione."; return false;
+            error = tr(L"Impossibile creare il file temporaneo di configurazione.", L"Cannot create the temporary configuration file."); return false;
         }
         DWORD count = 0;
         written = WriteFile(handle.value, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) && count == bytes.size() && FlushFileBuffers(handle.value);
         if (!written) {
             CloseHandle(handle.value); handle.value = INVALID_HANDLE_VALUE;
-            DeleteFileW(temporary.c_str()); error = L"Scrittura configurazione non riuscita."; return false;
+            DeleteFileW(temporary.c_str()); error = tr(L"Scrittura configurazione non riuscita.", L"Failed to write the configuration."); return false;
         }
     }
-    if (!written) { error = L"Impossibile creare un file temporaneo esclusivo."; return false; }
+    if (!written) { error = tr(L"Impossibile creare un file temporaneo esclusivo.", L"Cannot create an exclusive temporary file."); return false; }
     // Same-directory rename provides atomic replacement; never truncate the current file.
     if (!MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(temporary.c_str()); error = L"Sostituzione atomica configurazione non riuscita."; return false;
+        DeleteFileW(temporary.c_str()); error = tr(L"Sostituzione atomica configurazione non riuscita.", L"Atomic configuration replacement failed."); return false;
     }
     return true;
 }
@@ -291,20 +300,20 @@ NmapResult parse_nmap_xml(const std::filesystem::path& file, Protocol expected, 
         result.diagnostic = std::move(message);
         return result;
     };
-    if (!expectedIp.empty() && !valid_ipv4(expectedIp)) return fail(L"Target atteso non valido.");
+    if (!expectedIp.empty() && !valid_ipv4(expectedIp)) return fail(tr(L"Target atteso non valido.", L"Invalid expected target."));
     std::string bytes;
-    if (!read_bounded(file, kMaxXmlBytes, bytes) || bytes.empty()) return fail(L"XML assente, illeggibile o superiore al limite di 64 MiB.");
+    if (!read_bounded(file, kMaxXmlBytes, bytes) || bytes.empty()) return fail(tr(L"XML assente, illeggibile o superiore al limite di 64 MiB.", L"XML missing, unreadable or larger than the 64 MiB limit."));
     // Nmap emits this inert declaration without a DTD. All external/internal subsets are rejected.
     if (auto position = bytes.find("<!DOCTYPE"); position != std::string::npos) {
         constexpr std::string_view inert = "<!DOCTYPE nmaprun>";
-        if (bytes.compare(position, inert.size(), inert) != 0 || bytes.find("<!DOCTYPE", position + inert.size()) != std::string::npos) return fail(L"XML rifiutato: DTD o entita esterne non ammesse.");
+        if (bytes.compare(position, inert.size(), inert) != 0 || bytes.find("<!DOCTYPE", position + inert.size()) != std::string::npos) return fail(tr(L"XML rifiutato: DTD o entita esterne non ammesse.", L"XML rejected: DTDs and external entities are not allowed."));
         bytes.erase(position, inert.size());
     }
-    if (bytes.find("<!ENTITY") != std::string::npos) return fail(L"XML rifiutato: dichiarazioni di entita non ammesse.");
+    if (bytes.find("<!ENTITY") != std::string::npos) return fail(tr(L"XML rifiutato: dichiarazioni di entita non ammesse.", L"XML rejected: entity declarations are not allowed."));
     ComPtr<IStream> stream{SHCreateMemStream(reinterpret_cast<const BYTE*>(bytes.data()), static_cast<UINT>(bytes.size()))};
     ComPtr<IXmlReader> reader;
-    if (!stream.ptr || FAILED(CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void**>(&reader.ptr), nullptr))) return fail(L"Impossibile inizializzare il parser XML.");
-    if (FAILED(reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) || FAILED(reader->SetProperty(XmlReaderProperty_XmlResolver, 0)) || FAILED(reader->SetProperty(XmlReaderProperty_MaxElementDepth, 64)) || FAILED(reader->SetInput(stream.ptr))) return fail(L"Impossibile configurare il parser XML sicuro.");
+    if (!stream.ptr || FAILED(CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void**>(&reader.ptr), nullptr))) return fail(tr(L"Impossibile inizializzare il parser XML.", L"Cannot initialize the XML parser."));
+    if (FAILED(reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) || FAILED(reader->SetProperty(XmlReaderProperty_XmlResolver, 0)) || FAILED(reader->SetProperty(XmlReaderProperty_MaxElementDepth, 64)) || FAILED(reader->SetInput(stream.ptr))) return fail(tr(L"Impossibile configurare il parser XML sicuro.", L"Cannot configure the secure XML parser."));
     std::vector<std::wstring> path;
     std::optional<PortResult> current;
     std::bitset<kPortCount> explicitPorts;
@@ -323,60 +332,60 @@ NmapResult parse_nmap_xml(const std::filesystem::path& file, Protocol expected, 
         result.ports.push_back(std::move(*current)); current.reset(); return true;
     };
     while ((status = reader->Read(&type)) == S_OK) {
-        if (++nodes > 2000000) return fail(L"XML rifiutato: troppi nodi.");
+        if (++nodes > 2000000) return fail(tr(L"XML rifiutato: troppi nodi.", L"XML rejected: too many nodes."));
         UINT depth = 0;
-        if (FAILED(reader->GetDepth(&depth)) || depth > 64) return fail(L"XML rifiutato: annidamento eccessivo.");
-        if (type == XmlNodeType_DocumentType) return fail(L"XML rifiutato: DTD o entita non ammesse.");
+        if (FAILED(reader->GetDepth(&depth)) || depth > 64) return fail(tr(L"XML rifiutato: annidamento eccessivo.", L"XML rejected: excessive nesting."));
+        if (type == XmlNodeType_DocumentType) return fail(tr(L"XML rifiutato: DTD o entita non ammesse.", L"XML rejected: DTDs and entities are not allowed."));
         if (type != XmlNodeType_Element && type != XmlNodeType_EndElement) continue;
         const wchar_t* rawName = nullptr;
         UINT length = 0;
-        if (FAILED(reader->GetQualifiedName(&rawName, &length)) || length > 128) return fail(L"Nome XML non valido.");
+        if (FAILED(reader->GetQualifiedName(&rawName, &length)) || length > 128) return fail(tr(L"Nome XML non valido.", L"Invalid XML name."));
         std::wstring name(rawName, length);
         if (type == XmlNodeType_EndElement) {
-            if (path.empty() || path.back() != name) return fail(L"Struttura XML non valida.");
-            if (path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports", L"port"} && !completePort()) return fail(L"Porta duplicata o senza stato valido.");
+            if (path.empty() || path.back() != name) return fail(tr(L"Struttura XML non valida.", L"Invalid XML structure."));
+            if (path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports", L"port"} && !completePort()) return fail(tr(L"Porta duplicata o senza stato valido.", L"Duplicate port or port without a valid state."));
             if (path.size() == 1 && name == L"nmaprun") rootClosed = true;
             path.pop_back();
             continue;
         }
         const bool empty = reader->IsEmptyElement() != FALSE;
         Attributes attr;
-        if (!attributes(reader.ptr, attr, name == L"scaninfo")) return fail(L"XML rifiutato: attributi eccessivi o non validi.");
+        if (!attributes(reader.ptr, attr, name == L"scaninfo")) return fail(tr(L"XML rifiutato: attributi eccessivi o non validi.", L"XML rejected: excessive or invalid attributes."));
         const auto parent = path.empty() ? std::wstring{} : path.back();
         if (path.empty()) {
-            if (rootSeen || name != L"nmaprun" || get(attr, L"scanner") != L"nmap") return fail(L"Il file non e un risultato Nmap valido.");
+            if (rootSeen || name != L"nmaprun" || get(attr, L"scanner") != L"nmap") return fail(tr(L"Il file non e un risultato Nmap valido.", L"The file is not a valid Nmap result."));
             rootSeen = true; serviceRequested = has_service_flag(get(attr, L"args"));
         } else if (name == L"scaninfo" && path.size() == 1) {
-            if (scanInfoSeen || get(attr, L"protocol") != protocol || !number(get(attr, L"numservices"), declaredPorts) || declaredPorts > kPortCount) return fail(L"Copertura o protocollo scaninfo non validi.");
+            if (scanInfoSeen || get(attr, L"protocol") != protocol || !number(get(attr, L"numservices"), declaredPorts) || declaredPorts > kPortCount) return fail(tr(L"Copertura o protocollo scaninfo non validi.", L"Invalid scaninfo coverage or protocol."));
             const auto scanType = get(attr, L"type");
-            if ((expected == Protocol::Tcp && scanType != L"connect" && scanType != L"syn") || (expected == Protocol::Udp && scanType != L"udp")) return fail(L"Tipo di scansione inatteso.");
+            if ((expected == Protocol::Tcp && scanType != L"connect" && scanType != L"syn") || (expected == Protocol::Udp && scanType != L"udp")) return fail(tr(L"Tipo di scansione inatteso.", L"Unexpected scan type."));
             scanInfoSeen = true; fullRange = declaredPorts == kPortCount && full_range(get(attr, L"services"));
         } else if (name == L"host" && path.size() == 1) {
-            if (++hosts != 1) return fail(L"XML rifiutato: deve contenere un solo host.");
-            if (get(attr, L"timedout") == L"true") return fail(L"Nmap ha interrotto l'host per timeout: risultato parziale.");
+            if (++hosts != 1) return fail(tr(L"XML rifiutato: deve contenere un solo host.", L"XML rejected: it must contain exactly one host."));
+            if (get(attr, L"timedout") == L"true") return fail(tr(L"Nmap ha interrotto l'host per timeout: risultato parziale.", L"Nmap stopped the host scan after a timeout: partial result."));
         } else if (name == L"status" && path == std::vector<std::wstring>{L"nmaprun", L"host"}) {
             hostUp = get(attr, L"state") == L"up";
         } else if (name == L"address" && path == std::vector<std::wstring>{L"nmaprun", L"host"} && get(attr, L"addrtype") == L"ipv4") {
             const auto address = get(attr, L"addr");
-            if (++ipv4Addresses != 1 || !valid_ipv4(address) || (!expectedIp.empty() && address != expectedIp)) return fail(L"L'indirizzo XML non corrisponde al target richiesto.");
+            if (++ipv4Addresses != 1 || !valid_ipv4(address) || (!expectedIp.empty() && address != expectedIp)) return fail(tr(L"L'indirizzo XML non corrisponde al target richiesto.", L"The XML address does not match the requested target."));
         } else if (name == L"ports" && path == std::vector<std::wstring>{L"nmaprun", L"host"}) {
-            if (++portContainers != 1) return fail(L"Sezione porte duplicata.");
+            if (++portContainers != 1) return fail(tr(L"Sezione porte duplicata.", L"Duplicate ports section."));
         } else if (name == L"extraports" && path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports"}) {
             std::uint32_t count = 0;
             auto state = get(attr, L"state");
-            if (!state_valid(state) || !number(get(attr, L"count"), count) || !count || count > kPortCount || aggregateStates.contains(state)) return fail(L"Conteggio o stato aggregato delle porte non valido.");
+            if (!state_valid(state) || !number(get(attr, L"count"), count) || !count || count > kPortCount || aggregateStates.contains(state)) return fail(tr(L"Conteggio o stato aggregato delle porte non valido.", L"Invalid aggregate port count or state."));
             aggregateCount += count;
-            if (aggregateCount > kPortCount) return fail(L"Conteggio aggregato delle porte eccessivo.");
+            if (aggregateCount > kPortCount) return fail(tr(L"Conteggio aggregato delle porte eccessivo.", L"Excessive aggregate port count."));
             aggregateStates[state] = count;
         } else if (name == L"port" && path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports"}) {
             std::uint32_t port = 0;
-            if (current || !number(get(attr, L"portid"), port) || port >= kPortCount || get(attr, L"protocol") != protocol || explicitPorts[port] || empty) return fail(L"Protocollo, porta o duplicato non valido.");
+            if (current || !number(get(attr, L"portid"), port) || port >= kPortCount || get(attr, L"protocol") != protocol || explicitPorts[port] || empty) return fail(tr(L"Protocollo, porta o duplicato non valido.", L"Invalid protocol, port or duplicate entry."));
             current = PortResult{}; current->protocol = expected; current->port = port;
         } else if (name == L"state" && path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports", L"port"}) {
-            if (!current || !current->state.empty() || !state_valid(get(attr, L"state"))) return fail(L"Stato di porta non valido.");
+            if (!current || !current->state.empty() || !state_valid(get(attr, L"state"))) return fail(tr(L"Stato di porta non valido.", L"Invalid port state."));
             current->state = get(attr, L"state"); current->reason = field(get(attr, L"reason"));
         } else if (name == L"service" && path == std::vector<std::wstring>{L"nmaprun", L"host", L"ports", L"port"}) {
-            if (!current || !current->service.empty()) return fail(L"Servizio duplicato o fuori contesto.");
+            if (!current || !current->service.empty()) return fail(tr(L"Servizio duplicato o fuori contesto.", L"Duplicate or misplaced service."));
             current->service = field(get(attr, L"name")); current->product = field(get(attr, L"product"));
             current->version = field(get(attr, L"version")); current->extra = field(get(attr, L"extrainfo"));
             current->serviceFromResponse = get(attr, L"method") == L"probed";
@@ -384,38 +393,38 @@ NmapResult parse_nmap_xml(const std::filesystem::path& file, Protocol expected, 
             // Only a real, explicitly present banner field is a banner; service fingerprints are not.
             if (get(attr, L"id") == L"banner") current->banner = field(get(attr, L"output"));
         } else if (name == L"finished" && path == std::vector<std::wstring>{L"nmaprun", L"runstats"}) {
-            if (++finishedCount != 1) return fail(L"Risultato finale Nmap duplicato.");
+            if (++finishedCount != 1) return fail(tr(L"Risultato finale Nmap duplicato.", L"Duplicate Nmap completion result."));
             finishedSeen = true; result.finished = get(attr, L"exit") == L"success";
-            if (!result.finished) result.diagnostic = L"Nmap ha terminato con errore: risultato parziale. " + field(get(attr, L"errormsg"));
+            if (!result.finished) result.diagnostic = tr(L"Nmap ha terminato con errore: risultato parziale. ", L"Nmap finished with an error: partial result. ") + field(get(attr, L"errormsg"));
         }
         if (!empty) path.push_back(name);
         else if (path.empty() && name == L"nmaprun") rootClosed = true;
     }
-    if (FAILED(status) || !rootSeen || !rootClosed || !path.empty() || current) return fail(L"XML incompleto o malformato: risultato parziale.");
-    if (!expectedIp.empty() && ipv4Addresses != 1) return fail(L"XML privo dell'indirizzo IPv4 atteso.");
-    if (!scanInfoSeen || aggregateCount + result.ports.size() > kPortCount || aggregateCount + result.ports.size() > declaredPorts) return fail(L"Conteggio delle porte incoerente con scaninfo.");
+    if (FAILED(status) || !rootSeen || !rootClosed || !path.empty() || current) return fail(tr(L"XML incompleto o malformato: risultato parziale.", L"Incomplete or malformed XML: partial result."));
+    if (!expectedIp.empty() && ipv4Addresses != 1) return fail(tr(L"XML privo dell'indirizzo IPv4 atteso.", L"XML does not contain the expected IPv4 address."));
+    if (!scanInfoSeen || aggregateCount + result.ports.size() > kPortCount || aggregateCount + result.ports.size() > declaredPorts) return fail(tr(L"Conteggio delle porte incoerente con scaninfo.", L"Port count does not match scaninfo."));
     result.valid = true;
     result.scannedPorts = static_cast<std::uint32_t>(aggregateCount + result.ports.size());
     result.coverageComplete = fullRange && hosts == 1 && hostUp && portContainers == 1 && result.scannedPorts == kPortCount && finishedSeen && result.finished;
     result.serviceDetectionComplete = result.coverageComplete && serviceRequested;
-    if (!result.coverageComplete && result.diagnostic.empty()) result.diagnostic = L"Copertura incompleta: la fase resta parziale.";
+    if (!result.coverageComplete && result.diagnostic.empty()) result.diagnostic = tr(L"Copertura incompleta: la fase resta parziale.", L"Incomplete coverage: this phase remains partial.");
     std::wostringstream summary;
-    summary << (expected == Protocol::Tcp ? L"TCP" : L"UDP") << L": copertura " << result.scannedPorts << L"/65536 porte; " << (result.coverageComplete ? L"port scanning completo" : L"port scanning parziale") << L"; rilevamento servizi " << (result.serviceDetectionComplete ? L"terminato (esclusioni standard Nmap e servizi non identificati possibili)" : L"non completato o non verificabile") << L".\r\n";
-    for (const auto& [state, count] : aggregateStates) summary << L"Stato aggregato " << state << L": " << count << L" porte (numeri individuali non presenti nell'XML).\r\n";
-    if (expected == Protocol::Udp) summary << L"UDP: open|filtered significa aperta oppure filtrata; il silenzio non dimostra che una porta sia chiusa.\r\n";
+    summary << (expected == Protocol::Tcp ? L"TCP" : L"UDP") << tr(L": copertura ", L": coverage ") << result.scannedPorts << tr(L"/65536 porte; ", L"/65536 ports; ") << (result.coverageComplete ? tr(L"port scanning completo", L"port scanning complete") : tr(L"port scanning parziale", L"port scanning partial")) << tr(L"; rilevamento servizi ", L"; service detection ") << (result.serviceDetectionComplete ? tr(L"terminato (esclusioni standard Nmap e servizi non identificati possibili)", L"finished (standard Nmap exclusions apply; services may remain unidentified)") : tr(L"non completato o non verificabile", L"incomplete or unverifiable")) << L".\r\n";
+    for (const auto& [state, count] : aggregateStates) summary << tr(L"Stato aggregato ", L"Aggregate state ") << state << L": " << count << tr(L" porte (numeri individuali non presenti nell'XML).\r\n", L" ports (individual port numbers are not present in the XML).\r\n");
+    if (expected == Protocol::Udp) summary << tr(L"UDP: open|filtered significa aperta oppure filtrata; il silenzio non dimostra che una porta sia chiusa.\r\n", L"UDP: open|filtered means open or filtered; silence does not prove that a port is closed.\r\n");
     result.summary = summary.str();
     return result;
 }
 
 std::wstring format_port(const PortResult& p) {
     std::wostringstream output;
-    output << (p.protocol == Protocol::Tcp ? L"TCP" : L"UDP") << L" " << p.port << L" | " << field(p.state) << L" | servizio: ";
-    if (p.service.empty()) output << L"non identificato";
-    else output << field(p.service) << (p.serviceFromResponse ? L" (risposta)" : L" (nome convenzionale)");
-    output << L" | prodotto: " << (p.product.empty() ? L"non identificato" : field(p.product)) << L" | versione: " << (p.version.empty() ? L"non identificata" : field(p.version));
-    if (!p.extra.empty()) output << L" | informazioni: " << field(p.extra);
-    output << L" | banner: " << (p.banner.empty() ? L"non disponibile" : field(p.banner));
-    if (!p.reason.empty()) output << L" | motivo: " << field(p.reason);
+    output << (p.protocol == Protocol::Tcp ? L"TCP" : L"UDP") << L" " << p.port << L" | " << field(p.state) << tr(L" | servizio: ", L" | service: ");
+    if (p.service.empty()) output << tr(L"non identificato", L"unidentified");
+    else output << field(p.service) << (p.serviceFromResponse ? tr(L" (risposta)", L" (response-based)") : tr(L" (nome convenzionale)", L" (conventional port name)"));
+    output << tr(L" | prodotto: ", L" | product: ") << (p.product.empty() ? tr(L"non identificato", L"unidentified") : field(p.product)) << tr(L" | versione: ", L" | version: ") << (p.version.empty() ? tr(L"non identificata", L"unidentified") : field(p.version));
+    if (!p.extra.empty()) output << tr(L" | informazioni: ", L" | information: ") << field(p.extra);
+    output << L" | banner: " << (p.banner.empty() ? tr(L"non disponibile", L"not available") : field(p.banner));
+    if (!p.reason.empty()) output << tr(L" | motivo: ", L" | reason: ") << field(p.reason);
     output << L"\r\n";
     return output.str();
 }

@@ -1,8 +1,8 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][int]$ProcessId, [ValidateRange(10,3600)][int]$Seconds = 60, [string]$Condition = 'solo monitoraggio')
+param([Parameter(Mandatory)][int]$ProcessId, [ValidateRange(10,3600)][int]$Seconds = 60, [string]$Condition = 'monitoring only')
 . (Join-Path $PSScriptRoot 'common.ps1')
 $process = Get-Process -Id $ProcessId
-if ($process.ProcessName -ne 'scaping') { throw 'Il processo selezionato non e SCAPING.' }
+if ($process.ProcessName -ne 'scaping') { throw 'The selected process is not SCAPING.' }
 $startCpu = $process.TotalProcessorTime.TotalMilliseconds
 $logicalCpus = [Environment]::ProcessorCount
 $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -10,7 +10,7 @@ $samples = [Collections.Generic.List[long]]::new()
 for ($index = 0; $index -lt $Seconds; $index++) {
     Start-Sleep -Seconds 1
     $process.Refresh()
-    if ($process.HasExited) { throw 'SCAPING e terminato durante la misura.' }
+    if ($process.HasExited) { throw 'SCAPING exited during the measurement.' }
     $samples.Add($process.PrivateMemorySize64)
 }
 $watch.Stop()

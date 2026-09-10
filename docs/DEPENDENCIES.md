@@ -1,19 +1,23 @@
-# Dipendenze e fonti
+# Dependencies and references
 
-Il residente richiede solo DLL fornite da Windows 10; la Release usa il runtime C/C++ statico. La toolchain di sviluppo è MSVC 2022 con Windows SDK e CMake 3.24 o superiore. Non serve Visual Studio sul PC destinatario.
+[English](DEPENDENCIES.md) · [Italiano](DEPENDENCIES.it.md) · [README](../README.md)
 
-Per l'inventario completo, installare Nmap e Npcap dai rispettivi siti ufficiali, secondo le loro licenze. SCAPING non li installa e non include loro file nel pacchetto. Il driver Npcap può richiedere consenso amministrativo, e l'opzione di accesso solo agli amministratori influisce sull'esecuzione delle scansioni raw. Non modificare impostazioni globali soltanto per accelerare una scansione.
+The resident application requires only DLLs supplied with Windows 10. Release builds use a statically linked C/C++ runtime. Development requires MSVC 2022, the Windows SDK, and CMake 3.24 or later. Visual Studio is not required on the destination PC.
 
-- [Nmap per Windows e prerequisiti](https://nmap.org/book/inst-windows.html)
+For full port inventory, install Nmap and Npcap from their official sites under their respective licenses. SCAPING neither installs them nor includes their files in its package. Installing the Npcap driver may require administrator consent, and its administrators-only access option affects raw scans. Do not change global settings solely to accelerate a scan.
+
+- [Nmap on Windows and prerequisites](https://nmap.org/book/inst-windows.html)
 - [Download Nmap](https://nmap.org/download.html)
 - [Npcap](https://npcap.com/)
-- [Tecniche di scansione e privilegi](https://nmap.org/book/man-port-scanning-techniques.html)
-- [Porte, inclusione esplicita della porta 0](https://nmap.org/book/man-port-specification.html)
-- [Rilevamento versioni ed esclusioni delle sonde](https://nmap.org/book/man-version-detection.html)
-- [Limiti della scansione UDP](https://nmap.org/book/scan-methods-udp-scan.html)
-- [Nmap: condizioni legali](https://nmap.org/book/man-legal.html)
-- [Nmap OEM e redistribuzione](https://nmap.org/oem/)
-- [IcmpSendEcho2 asincrono](https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho2)
+- [Scan techniques and privileges](https://nmap.org/book/man-port-scanning-techniques.html)
+- [Port selection, including explicit port 0](https://nmap.org/book/man-port-specification.html)
+- [Version detection and probe exclusions](https://nmap.org/book/man-version-detection.html)
+- [UDP scanning limitations](https://nmap.org/book/scan-methods-udp-scan.html)
+- [Nmap legal terms](https://nmap.org/book/man-legal.html)
+- [Nmap OEM and redistribution](https://nmap.org/oem/)
+- [Asynchronous IcmpSendEcho2](https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho2)
 - [Job Objects](https://learn.microsoft.com/windows/win32/procthread/job-objects)
 
-Il fatto di lanciare Nmap come processo esterno non concede diritti di redistribuzione. Qualsiasi futuro pacchetto che incorpori Nmap/Npcap richiede una verifica separata dei termini applicabili alla versione distribuita.
+Launching Nmap as an external process does not grant redistribution rights. Any future package that includes Nmap or Npcap requires a separate review of the terms applicable to the distributed versions.
+
+SCAPING's language setting translates its own interface and explanatory text. It does not translate Nmap's output, received banners, service names, or other external data. Those retain their original content regardless of the selected interface language.

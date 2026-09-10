@@ -59,7 +59,7 @@ struct Listener {
     ~Listener() { SetEvent(stop.value); if (thread.joinable()) thread.join(); }
 };
 void test_ping() {
-    scaping::Config config; config.ip = L"127.0.0.1"; config.intervalMs = 250; config.timeoutMs = 200; config.slowMs = 150;
+    scaping::Config config; config.language = scaping::current_language(); config.ip = L"127.0.0.1"; config.intervalMs = 250; config.timeoutMs = 200; config.slowMs = 150;
     scaping::net::Handle received(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     std::mutex mutex;
     scaping::PingResult latest;
@@ -89,7 +89,7 @@ void test_tcp() {
     Winsock winsock;
     scaping::net::Handle cancel(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     const auto timeout = scaping::net::classify_tcp_error_for_test(12345, WSAETIMEDOUT);
-    require(timeout.state != L"closed" && timeout.reason.find(L"incerto") != std::wstring::npos, "simulated TCP timeout declared closed");
+    require(timeout.state != L"closed" && timeout.reason.find(scaping::current_language() == scaping::Language::English ? L"uncertain" : L"incerto") != std::wstring::npos, "simulated TCP timeout declared closed");
     const auto localError = scaping::net::classify_tcp_error_for_test(12345, WSAEMFILE);
     require(localError.state != L"closed" && localError.state != L"open", "simulated local socket exhaustion misclassified");
     {
@@ -218,6 +218,7 @@ void test_worker_boundary() {
 }
 void test_scan_session() {
     scaping::Config config; config.ip = L"127.0.0.1";
+    config.language = scaping::current_language();
     config.nmapPath = L"D:\\scaping\\tests\\nonexistent-synthetic-fixture\\nmap.exe";
     config.connectionsPerSecond = 1;
     scaping::net::Handle finished(CreateEventW(nullptr, TRUE, FALSE, nullptr));
@@ -228,12 +229,19 @@ void test_scan_session() {
     const auto began = GetTickCount64();
     require(session.start(config, [&](std::wstring text) { std::lock_guard lock(mutex); output += text; }, [&](scaping::ScanCompletion result) { completion = std::move(result); SetEvent(finished.value); }), "scan start rejected");
     require(!session.start(config, {}, {}), "overlapping scan accepted");
-    Sleep(200);
-    session.cancel();
-    require(WaitForSingleObject(finished.value, 5000) == WAIT_OBJECT_0, "scan session did not cancel");
+    {
+        // Simulate the caller changing UI language while the scan keeps its initial language.
+        const scaping::ScopedLanguage changed(config.language == scaping::Language::English ? scaping::Language::Italian : scaping::Language::English);
+        Sleep(200);
+        session.cancel();
+        require(WaitForSingleObject(finished.value, 5000) == WAIT_OBJECT_0, "scan session did not cancel");
+    }
     require(completion.cancelled && !completion.complete && !completion.udpComplete && !session.running(), "cancelled fallback not partial");
     require(GetTickCount64() - began < 3000, "scan cancellation too slow");
-    require(output.find(L"Solo TCP") != std::wstring::npos, "absent Nmap fallback not disclosed");
+    const bool english = config.language == scaping::Language::English;
+    require(output.find(english ? L"TCP only" : L"Solo TCP") != std::wstring::npos, "absent Nmap fallback not disclosed in snapshot language");
+    require(completion.summary.find(english ? L"PARTIAL" : L"PARZIALE") != std::wstring::npos, "completion changed language with the caller");
+    require(output.find(english ? L"Solo TCP" : L"TCP only") == std::wstring::npos, "scan report mixes application languages");
     require(!completion.reportPath.empty() && std::filesystem::exists(completion.reportPath), "complete report not saved");
     const auto reportDirectory = completion.reportPath.parent_path();
     const auto expectedBase = std::filesystem::path(scaping::kRoot) / L"data" / L"reports";
@@ -244,6 +252,8 @@ void test_scan_session() {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc == 3 && std::wstring_view(argv[1]) == L"--child") return child_mode(argv[2]);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--language=en") scaping::set_language(scaping::Language::English);
+    else if (argc != 1) return 2;
     try {
         test_ping(); test_tcp(); test_processes(); test_worker_boundary(); test_scan_session();
         std::cout << "Network integration checks passed: " << checks << "\n";

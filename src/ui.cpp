@@ -1,5 +1,6 @@
 #include "scaping/ui.hpp"
 #include "scaping/core.hpp"
+#include "scaping/language.hpp"
 #include "scaping/network.hpp"
 #include <windowsx.h>
 #include <shellapi.h>
@@ -34,7 +35,7 @@ constexpr int kExit = 101, kConfigure = 102, kScan = 103;
 constexpr int kIp = 201, kInterval = 202, kTimeout = 203, kSlow = 204;
 constexpr int kAutostart = 205, kNmap = 206, kBrowse = 207;
 constexpr int kConcurrency = 208, kRate = 209, kApply = 210, kDismiss = 211;
-constexpr int kConfigStatus = 212;
+constexpr int kConfigStatus = 212, kLanguage = 213;
 constexpr int kOutput = 301, kCancelScan = 302, kCopy = 303, kSave = 304;
 constexpr int kHideResults = 305, kTarget = 306, kScanStatus = 307, kProgress = 308;
 
@@ -143,11 +144,14 @@ constexpr ConfigPosition kConfigPositions[] = {
     {kInterval,16,105,150,27}, {kTimeout,178,105,150,27}, {kSlow,340,105,150,27},
     {kAutostart,16,150,474,24},
     {404,16,191,474,20}, {kNmap,16,214,377,27}, {kBrowse,405,214,85,27},
-    {405,16,246,474,35},
+    {405,16,246,474,40},
     {406,16,294,474,105}, {407,30,319,214,20}, {408,261,319,215,20},
     {kConcurrency,30,344,214,27}, {kRate,261,344,215,27},
-    {kConfigStatus,16,412,474,46}, {kApply,282,475,99,31}, {kDismiss,392,475,98,31}
+    {kConfigStatus,16,412,474,46}, {409,16,481,120,20}, {kLanguage,142,477,128,120},
+    {kApply,282,475,99,31}, {kDismiss,392,475,98,31}
 };
+
+enum class FinalState { None, FailedToStart, Complete, Cancelled, Partial };
 
 class Application {
 public:
@@ -174,7 +178,9 @@ private:
     PingMonitor ping_;
     ScanSession scan_;
     bool scanning_ = false, cancellationRequested_ = false;
-    std::wstring scanTarget_, finalSummary_;
+    std::wstring scanTarget_;
+    Language scanLanguage_ = Language::Italian;
+    FinalState finalState_ = FinalState::None;
     std::filesystem::path reportPath_;
     std::chrono::steady_clock::time_point scanStart_;
     std::chrono::seconds finalElapsed_{0};
@@ -190,6 +196,8 @@ private:
     void size_config();
     void size_results();
     void set_fonts(HWND, bool);
+    void refresh_language();
+    std::wstring final_status() const;
     void show_configuration();
     void fill_configuration();
     void apply_configuration();
@@ -232,6 +240,10 @@ bool Application::register_class(const wchar_t* name, WNDPROC procedure, HBRUSH 
 }
 
 bool Application::initialize() {
+    auto loaded = load_config(std::filesystem::path(kRoot) / L"data" / L"config.ini");
+    config_ = loaded.config;
+    set_language(config_.language);
+    configDiagnostic_ = loaded.diagnostic;
     activate_ = RegisterWindowMessageW(L"Scaping.Activate.v1");
     taskbarCreated_ = RegisterWindowMessageW(L"TaskbarCreated");
     if (!activate_ || !taskbarCreated_) return false;
@@ -254,7 +266,7 @@ bool Application::initialize() {
             }
             Sleep(50);
         }
-        MessageBoxW(nullptr, L"Scaping è già in esecuzione nella sessione. L'icona sarà disponibile nella system tray.", L"Scaping", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, tr(L"Scaping è già in esecuzione nella sessione. L'icona sarà disponibile nella system tray.", L"Scaping is already running in this session. Its icon is available in the system tray."), L"Scaping", MB_OK | MB_ICONINFORMATION);
         return true;
     }
     const int iconSize = (std::max)(16, GetSystemMetrics(SM_CXSMICON));
@@ -266,9 +278,6 @@ bool Application::initialize() {
     if (!register_class(kResidentClass, resident_proc, nullptr) ||
         !register_class(kConfigClass, config_proc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1)) ||
         !register_class(kResultsClass, results_proc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1))) return false;
-    auto loaded = load_config(std::filesystem::path(kRoot) / L"data" / L"config.ini");
-    config_ = loaded.config;
-    configDiagnostic_ = loaded.diagnostic;
     resident_ = CreateWindowExW(WS_EX_TOOLWINDOW, kResidentClass, residentTitle_.c_str(), WS_OVERLAPPED,
         0, 0, 0, 0, nullptr, nullptr, instance_, this);
     if (!resident_) return false;
@@ -324,30 +333,85 @@ void Application::set_fonts(HWND window, bool resultWindow) {
 }
 
 void Application::create_config_controls() {
-    child(configuration_, L"STATIC", L"IP da monitorare — IPv4 numerico", 0, 400);
+    child(configuration_, L"STATIC", L"", 0, 400);
     child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, kIp, WS_EX_CLIENTEDGE);
-    child(configuration_, L"STATIC", L"Intervallo ping (ms)", 0, 401);
-    child(configuration_, L"STATIC", L"Timeout (ms)", 0, 402);
-    child(configuration_, L"STATIC", L"Soglia ping lento (ms)", 0, 403);
-    for (int id : {kInterval, kTimeout, kSlow}) child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, id, WS_EX_CLIENTEDGE);
-    child(configuration_, L"BUTTON", L"Avvio con Windows (solo utente corrente)", WS_TABSTOP | BS_AUTOCHECKBOX, kAutostart);
-    child(configuration_, L"STATIC", L"Percorso Nmap (facoltativo)", 0, 404);
+    // Each static label directly precedes its field in the native accessibility order.
+    child(configuration_, L"STATIC", L"", 0, 401);
+    child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, kInterval, WS_EX_CLIENTEDGE);
+    child(configuration_, L"STATIC", L"", 0, 402);
+    child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, kTimeout, WS_EX_CLIENTEDGE);
+    child(configuration_, L"STATIC", L"", 0, 403);
+    child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, kSlow, WS_EX_CLIENTEDGE);
+    child(configuration_, L"BUTTON", L"", WS_TABSTOP | BS_AUTOCHECKBOX, kAutostart);
+    child(configuration_, L"STATIC", L"", 0, 404);
     child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, kNmap, WS_EX_CLIENTEDGE);
-    child(configuration_, L"BUTTON", L"Sfoglia…", WS_TABSTOP | BS_PUSHBUTTON, kBrowse);
-    child(configuration_, L"STATIC", L"Campo vuoto: rilevamento automatico durante la scansione.\r\nSenza Nmap: Solo TCP — modalità ridotta.", 0, 405);
-    child(configuration_, L"BUTTON", L"Limiti avanzati del fallback TCP", BS_GROUPBOX, 406);
-    child(configuration_, L"STATIC", L"Connessioni contemporanee", 0, 407);
-    child(configuration_, L"STATIC", L"Nuove connessioni al secondo", 0, 408);
+    child(configuration_, L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, kBrowse);
+    child(configuration_, L"STATIC", L"", 0, 405);
+    child(configuration_, L"BUTTON", L"", BS_GROUPBOX, 406);
+    child(configuration_, L"STATIC", L"", 0, 407);
     child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, kConcurrency, WS_EX_CLIENTEDGE);
+    child(configuration_, L"STATIC", L"", 0, 408);
     child(configuration_, L"EDIT", L"", WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, kRate, WS_EX_CLIENTEDGE);
     child(configuration_, L"STATIC", L"", 0, kConfigStatus);
-    child(configuration_, L"BUTTON", L"Applica", WS_TABSTOP | BS_DEFPUSHBUTTON, kApply);
-    child(configuration_, L"BUTTON", L"Chiudi", WS_TABSTOP | BS_PUSHBUTTON, kDismiss);
+    child(configuration_, L"STATIC", L"Lingua / Language", 0, 409);
+    HWND language = child(configuration_, L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST | CBS_HASSTRINGS, kLanguage);
+    SendMessageW(language, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Italiano"));
+    SendMessageW(language, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
+    child(configuration_, L"BUTTON", L"", WS_TABSTOP | BS_DEFPUSHBUTTON, kApply);
+    child(configuration_, L"BUTTON", L"", WS_TABSTOP | BS_PUSHBUTTON, kDismiss);
     SendDlgItemMessageW(configuration_, kIp, EM_SETLIMITTEXT, 15, 0);
     SendDlgItemMessageW(configuration_, kNmap, EM_SETLIMITTEXT, 32700, 0);
     for (int id : {kInterval, kTimeout, kSlow, kConcurrency, kRate}) SendDlgItemMessageW(configuration_, id, EM_SETLIMITTEXT, 8, 0);
     set_fonts(configuration_, false);
+    refresh_language();
     size_config();
+}
+
+void Application::refresh_language() {
+    if (configuration_) {
+        SetWindowTextW(configuration_, tr(L"Scaping — Configura IP", L"Scaping — Configure IP"));
+        const std::pair<int, const wchar_t*> labels[]{
+            {400, tr(L"IP da monitorare — IPv4 numerico", L"IP to monitor — numeric IPv4")},
+            {401, tr(L"Intervallo ping (ms)", L"Ping interval (ms)")},
+            {402, tr(L"Timeout (ms)", L"Timeout (ms)")},
+            {403, tr(L"Soglia ping lento (ms)", L"Slow ping threshold (ms)")},
+            {kAutostart, tr(L"Avvio con Windows (solo utente corrente)", L"Start with Windows (current user only)")},
+            {404, tr(L"Percorso Nmap (facoltativo)", L"Nmap path (optional)")},
+            {kBrowse, tr(L"Sfoglia…", L"Browse…")},
+            {405, tr(L"Campo vuoto: rilevamento automatico durante la scansione.\r\nSenza Nmap: Solo TCP — modalità ridotta.",
+                L"Leave blank to detect Nmap automatically when scanning.\r\nWithout Nmap: TCP only — reduced mode.")},
+            {406, tr(L"Limiti avanzati del fallback TCP", L"Advanced TCP fallback limits")},
+            {407, tr(L"Connessioni contemporanee", L"Concurrent connections")},
+            {408, tr(L"Nuove connessioni al secondo", L"New connections per second")},
+            {kApply, tr(L"Applica", L"Apply")},
+            {kDismiss, tr(L"Chiudi", L"Close")}
+        };
+        for (const auto& [id, text] : labels) SetDlgItemTextW(configuration_, id, text);
+        if (configDiagnostic_.empty()) SetDlgItemTextW(configuration_, kConfigStatus,
+            tr(L"La soglia deve essere inferiore al timeout. La scansione usa un'istantanea dell'IP e parte solo dal menu tray.",
+               L"The threshold must be below the timeout. Scans use a snapshot of the IP and start only from the tray menu."));
+    }
+    if (results_) {
+        SetWindowTextW(results_, tr(L"Scaping — Risultati", L"Scaping — Results"));
+        SetDlgItemTextW(results_, kCancelScan, tr(L"Annulla scansione", L"Cancel scan"));
+        SetDlgItemTextW(results_, kCopy, tr(L"Copia", L"Copy"));
+        SetDlgItemTextW(results_, kSave, tr(L"Salva report", L"Save report"));
+        SetDlgItemTextW(results_, kHideResults, tr(L"Chiudi finestra", L"Close window"));
+        SetDlgItemTextW(results_, kTarget, (L"Target: " + scanTarget_ +
+            tr(L"  |  Porte 0–65535 TCP e UDP richieste", L"  |  TCP and UDP ports 0–65535 requested")).c_str());
+        update_scan_status();
+    }
+    update_tray();
+}
+
+std::wstring Application::final_status() const {
+    switch (finalState_) {
+    case FinalState::FailedToStart: return tr(L"Parziale — impossibile avviare il worker di scansione.", L"Partial — unable to start the scan worker.");
+    case FinalState::Complete: return tr(L"Completata — TCP e UDP", L"Completed — TCP and UDP");
+    case FinalState::Cancelled: return tr(L"Parziale — scansione annullata", L"Partial — scan cancelled");
+    case FinalState::Partial: return tr(L"Parziale", L"Partial");
+    default: return tr(L"Nessuna scansione avviata", L"No scan started");
+    }
 }
 
 void Application::size_config() {
@@ -368,11 +432,11 @@ void Application::show_configuration() {
         RECT bounds{0,0,scale(506,dpi),scale(522,dpi)};
         constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         AdjustWindowRectExForDpi(&bounds, style, FALSE, WS_EX_APPWINDOW, dpi);
-        configuration_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, kConfigClass, L"Scaping — Configura IP",
+        configuration_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, kConfigClass, tr(L"Scaping — Configura IP", L"Scaping — Configure IP"),
             style, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top,
             resident_, nullptr, instance_, this);
         if (!configuration_) {
-            MessageBoxW(resident_, L"Impossibile aprire la configurazione.", L"Scaping", MB_OK | MB_ICONERROR);
+            MessageBoxW(resident_, tr(L"Impossibile aprire la configurazione.", L"Unable to open configuration."), L"Scaping", MB_OK | MB_ICONERROR);
             return;
         }
     }
@@ -390,14 +454,16 @@ void Application::fill_configuration() {
     SetDlgItemTextW(configuration_, kNmap, config_.nmapPath.c_str());
     SetDlgItemTextW(configuration_, kConcurrency, std::to_wstring(config_.concurrency).c_str());
     SetDlgItemTextW(configuration_, kRate, std::to_wstring(config_.connectionsPerSecond).c_str());
+    SendDlgItemMessageW(configuration_, kLanguage, CB_SETCURSEL, config_.language == Language::English ? 1 : 0, 0);
     const auto note = configDiagnostic_.empty() ?
-        L"La soglia deve essere inferiore al timeout. La scansione usa un'istantanea dell'IP e parte solo dal menu tray." : configDiagnostic_.c_str();
+        tr(L"La soglia deve essere inferiore al timeout. La scansione usa un'istantanea dell'IP e parte solo dal menu tray.",
+           L"The threshold must be below the timeout. Scans use a snapshot of the IP and start only from the tray menu.") : configDiagnostic_.c_str();
     SetDlgItemTextW(configuration_, kConfigStatus, note);
 }
 
 void Application::configuration_error(const std::wstring& message, int control) {
     SetDlgItemTextW(configuration_, kConfigStatus, message.c_str());
-    MessageBoxW(configuration_, message.c_str(), L"Scaping — configurazione non valida", MB_OK | MB_ICONWARNING);
+    MessageBoxW(configuration_, message.c_str(), tr(L"Scaping — configurazione non valida", L"Scaping — invalid configuration"), MB_OK | MB_ICONWARNING);
     SetFocus(GetDlgItem(configuration_, control));
 }
 
@@ -406,7 +472,7 @@ bool Application::set_autostart_and_save(const Config& next, std::wstring& error
     const auto open = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
         nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &rawKey, nullptr);
     if (open != ERROR_SUCCESS) {
-        error = L"Impossibile aggiornare l'avvio con Windows per l'utente corrente (errore " + std::to_wstring(open) + L").";
+        error = tr(L"Impossibile aggiornare l'avvio con Windows per l'utente corrente (errore ", L"Unable to update startup for the current user (error ") + std::to_wstring(open) + L").";
         return false;
     }
     OwnedKey key(rawKey);
@@ -414,12 +480,12 @@ bool Application::set_autostart_and_save(const Config& next, std::wstring& error
     LSTATUS query = RegQueryValueExW(key.get(), L"Scaping", nullptr, &oldType, nullptr, &oldSize);
     const bool existed = query == ERROR_SUCCESS;
     if ((!existed && query != ERROR_FILE_NOT_FOUND) || oldSize > 64 * 1024) {
-        error = L"Impossibile leggere in sicurezza l'impostazione di avvio esistente.";
+        error = tr(L"Impossibile leggere in sicurezza l'impostazione di avvio esistente.", L"Unable to read the existing startup setting safely.");
         return false;
     }
     std::vector<BYTE> previous(oldSize);
     if (existed && RegQueryValueExW(key.get(), L"Scaping", nullptr, &oldType, previous.data(), &oldSize) != ERROR_SUCCESS) {
-        error = L"L'impostazione di avvio è cambiata. Riprova ad applicare la configurazione.";
+        error = tr(L"L'impostazione di avvio è cambiata. Riprova ad applicare la configurazione.", L"The startup setting changed. Try applying the configuration again.");
         return false;
     }
     LSTATUS modified = ERROR_SUCCESS;
@@ -432,12 +498,12 @@ bool Application::set_autostart_and_save(const Config& next, std::wstring& error
         if (modified == ERROR_FILE_NOT_FOUND) modified = ERROR_SUCCESS;
     }
     if (modified != ERROR_SUCCESS) {
-        error = L"Impossibile modificare l'avvio con Windows (errore " + std::to_wstring(modified) + L").";
+        error = tr(L"Impossibile modificare l'avvio con Windows (errore ", L"Unable to change Windows startup (error ") + std::to_wstring(modified) + L").";
         return false;
     }
     if (save_config(std::filesystem::path(kRoot) / L"data" / L"config.ini", next, error)) return true;
     LSTATUS restored = existed ? RegSetValueExW(key.get(), L"Scaping", 0, oldType, previous.data(), oldSize) : RegDeleteValueW(key.get(), L"Scaping");
-    if (restored != ERROR_SUCCESS && restored != ERROR_FILE_NOT_FOUND) error += L" Anche il ripristino dell'avvio automatico non è riuscito: verifica l'impostazione in Windows.";
+    if (restored != ERROR_SUCCESS && restored != ERROR_FILE_NOT_FOUND) error += tr(L" Anche il ripristino dell'avvio automatico non è riuscito: verifica l'impostazione in Windows.", L" Restoring the startup setting also failed: check it in Windows.");
     return false;
 }
 
@@ -446,6 +512,7 @@ void Application::apply_configuration() {
     next.ip = window_text(GetDlgItem(configuration_, kIp));
     next.nmapPath = window_text(GetDlgItem(configuration_, kNmap));
     next.autoStart = IsDlgButtonChecked(configuration_, kAutostart) == BST_CHECKED;
+    next.language = SendDlgItemMessageW(configuration_, kLanguage, CB_GETCURSEL, 0, 0) == 1 ? Language::English : Language::Italian;
     const std::array<std::pair<int,std::uint32_t*>,5> numeric{{
         {kInterval,&next.intervalMs}, {kTimeout,&next.timeoutMs}, {kSlow,&next.slowMs},
         {kConcurrency,&next.concurrency}, {kRate,&next.connectionsPerSecond}
@@ -459,15 +526,19 @@ void Application::apply_configuration() {
             number = number * 10 + static_cast<unsigned>(c - L'0');
             if (number > (std::numeric_limits<std::uint32_t>::max)()) { valid = false; break; }
         }
-        if (!valid) { configuration_error(L"Inserisci valori numerici interi positivi nei campi di tempo e di velocità.", id); return; }
+        if (!valid) { configuration_error(tr(L"Inserisci valori numerici interi positivi nei campi di tempo e di velocità.", L"Enter positive whole numbers for time and connection limits."), id); return; }
         *destination = static_cast<std::uint32_t>(number);
     }
-    if (auto invalid = validate_config(next)) { configuration_error(*invalid); return; }
+    // A language preference may be saved before the first target is configured.
+    const bool allowUnconfigured = config_.ip.empty() && next.ip.empty();
+    if (auto invalid = validate_config(next, allowUnconfigured)) { configuration_error(*invalid); return; }
     std::wstring error;
     if (!set_autostart_and_save(next, error)) { configuration_error(error); return; }
     config_ = std::move(next);
+    set_language(config_.language);
     configDiagnostic_.clear();
     restart_ping();
+    refresh_language();
     ShowWindow(configuration_, SW_HIDE);
 }
 
@@ -477,10 +548,10 @@ void Application::browse_nmap() {
     if (current.size() < path.size()) std::copy(current.begin(), current.end(), path.begin());
     OPENFILENAMEW selection{sizeof(selection)};
     selection.hwndOwner = configuration_;
-    selection.lpstrFilter = L"Nmap (nmap.exe)\0nmap.exe\0Eseguibili (*.exe)\0*.exe\0\0";
+    selection.lpstrFilter = tr(L"Nmap (nmap.exe)\0nmap.exe\0Eseguibili (*.exe)\0*.exe\0\0", L"Nmap (nmap.exe)\0nmap.exe\0Executables (*.exe)\0*.exe\0\0");
     selection.lpstrFile = path.data();
     selection.nMaxFile = static_cast<DWORD>(path.size());
-    selection.lpstrTitle = L"Seleziona l'eseguibile Nmap";
+    selection.lpstrTitle = tr(L"Seleziona l'eseguibile Nmap", L"Select the Nmap executable");
     selection.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
     if (GetOpenFileNameW(&selection)) SetDlgItemTextW(configuration_, kNmap, path.data());
 }
@@ -492,10 +563,10 @@ void Application::create_result_controls() {
     child(results_, L"EDIT", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | ES_LEFT | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
         kOutput, WS_EX_CLIENTEDGE);
     SendDlgItemMessageW(results_, kOutput, EM_SETLIMITTEXT, kVisibleLimit + 65536, 0);
-    child(results_, L"BUTTON", L"Annulla scansione", WS_TABSTOP | BS_PUSHBUTTON, kCancelScan);
-    child(results_, L"BUTTON", L"Copia", WS_TABSTOP | BS_PUSHBUTTON, kCopy);
-    child(results_, L"BUTTON", L"Salva report", WS_TABSTOP | BS_PUSHBUTTON, kSave);
-    child(results_, L"BUTTON", L"Chiudi finestra", WS_TABSTOP | BS_PUSHBUTTON, kHideResults);
+    child(results_, L"BUTTON", tr(L"Annulla scansione", L"Cancel scan"), WS_TABSTOP | BS_PUSHBUTTON, kCancelScan);
+    child(results_, L"BUTTON", tr(L"Copia", L"Copy"), WS_TABSTOP | BS_PUSHBUTTON, kCopy);
+    child(results_, L"BUTTON", tr(L"Salva report", L"Save report"), WS_TABSTOP | BS_PUSHBUTTON, kSave);
+    child(results_, L"BUTTON", tr(L"Chiudi finestra", L"Close window"), WS_TABSTOP | BS_PUSHBUTTON, kHideResults);
     set_fonts(results_, true);
     size_results();
 }
@@ -532,11 +603,11 @@ void Application::show_results() {
         const UINT dpi = GetDpiForSystem();
         RECT bounds{0,0,scale(910,dpi),scale(590,dpi)};
         AdjustWindowRectExForDpi(&bounds, WS_OVERLAPPEDWINDOW, FALSE, WS_EX_APPWINDOW, dpi);
-        results_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, kResultsClass, L"Scaping — Risultati",
+        results_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_CONTROLPARENT, kResultsClass, tr(L"Scaping — Risultati", L"Scaping — Results"),
             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, bounds.right-bounds.left,bounds.bottom-bounds.top,
             resident_, nullptr, instance_, this);
         if (!results_) {
-            MessageBoxW(resident_, L"Impossibile aprire la finestra dei risultati.", L"Scaping", MB_OK | MB_ICONERROR);
+            MessageBoxW(resident_, tr(L"Impossibile aprire la finestra dei risultati.", L"Unable to open the results window."), L"Scaping", MB_OK | MB_ICONERROR);
             return;
         }
     }
@@ -547,25 +618,30 @@ void Application::start_scan() {
     if (scanning_) { show_results(); return; }
     if (!valid_ipv4(config_.ip)) {
         show_configuration();
-        configuration_error(L"Configura e applica un indirizzo IPv4 numerico prima di avviare la scansione.");
+        configuration_error(tr(L"Configura e applica un indirizzo IPv4 numerico prima di avviare la scansione.", L"Configure and apply a numeric IPv4 address before starting a scan."));
         return;
     }
     show_results();
     if (!results_) return;
     flush_mailbox();
     reportPath_.clear();
-    finalSummary_.clear();
+    finalState_ = FinalState::None;
     cancellationRequested_ = false;
     scanTarget_ = config_.ip;
+    scanLanguage_ = config_.language;
     scanStart_ = std::chrono::steady_clock::now();
     finalElapsed_ = std::chrono::seconds(0);
     SetDlgItemTextW(results_, kOutput, L"");
-    SetDlgItemTextW(results_, kTarget, (L"Target: " + scanTarget_ + L"  |  Porte 0–65535 TCP e UDP richieste").c_str());
-    append_output(L"SCAPING — INVENTARIO PORTE\r\nTarget della scansione: " + scanTarget_ +
-        L"\r\nIl target rimane invariato se modifichi l'IP monitorato.\r\n"
-        L"Scansione su richiesta; usa soltanto sistemi che sei autorizzato a verificare.\r\n"
-        L"UDP può richiedere molto tempo; open|filtered rimane un esito incerto.\r\n"
-        L"Il testo visibile è limitato; il report completo è salvato localmente.\r\n\r\n");
+    SetDlgItemTextW(results_, kTarget, (L"Target: " + scanTarget_ + tr(L"  |  Porte 0–65535 TCP e UDP richieste", L"  |  TCP and UDP ports 0–65535 requested")).c_str());
+    append_output(tr(L"SCAPING — INVENTARIO PORTE\r\nTarget della scansione: ", L"SCAPING — PORT INVENTORY\r\nScan target: ") + scanTarget_ +
+        tr(L"\r\nIl target rimane invariato se modifichi l'IP monitorato.\r\n"
+           L"Scansione su richiesta; usa soltanto sistemi che sei autorizzato a verificare.\r\n"
+           L"UDP può richiedere molto tempo; open|filtered rimane un esito incerto.\r\n"
+           L"Il testo visibile è limitato; il report completo è salvato localmente.\r\n\r\n",
+           L"\r\nThe target remains unchanged if you edit the monitored IP.\r\n"
+           L"On-demand scan; only scan systems you are authorized to assess.\r\n"
+           L"UDP may take a long time; open|filtered remains uncertain.\r\n"
+           L"Visible text is limited; the full report is saved locally.\r\n\r\n"));
     const std::weak_ptr<Mailbox> weak = mailbox_;
     const bool started = scan_.start(config_, [weak](std::wstring text) {
         if (auto box = weak.lock()) {
@@ -591,8 +667,8 @@ void Application::start_scan() {
     });
     scanning_ = started;
     if (!started) {
-        finalSummary_ = L"Parziale — impossibile avviare il worker di scansione.";
-        append_output(finalSummary_ + L"\r\n");
+        finalState_ = FinalState::FailedToStart;
+        append_output(final_status() + L"\r\n");
     } else SetTimer(resident_, kBatchTimer, 150, nullptr);
     EnableWindow(GetDlgItem(results_, kCancelScan), scanning_);
     EnableWindow(GetDlgItem(results_, kSave), FALSE);
@@ -670,7 +746,11 @@ void Application::flush_mailbox() {
         color_ = ping_color(*lastPing_,config_.slowMs);
         update_tray();
     }
-    if (dropped) append_output(L"\r\n[Alcune righe precedenti sono presenti soltanto nel report completo su disco.]\r\n");
+    if (dropped) {
+        const ScopedLanguage reportLanguage(scanLanguage_);
+        append_output(tr(L"\r\n[Alcune righe precedenti sono presenti soltanto nel report completo su disco.]\r\n",
+            L"\r\n[Some earlier lines are available only in the full report on disk.]\r\n"));
+    }
     append_output(std::move(output));
     if (completion) {
         scanning_ = false;
@@ -678,10 +758,16 @@ void Application::flush_mailbox() {
         finalElapsed_ = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-scanStart_);
         reportPath_ = std::move(completion->reportPath);
         const bool allComplete = completion->complete && completion->tcpComplete && completion->udpComplete && !completion->cancelled;
-        finalSummary_ = allComplete ? L"Completata — TCP e UDP" : (completion->cancelled ? L"Parziale — scansione annullata" : L"Parziale");
-        if (!completion->summary.empty()) finalSummary_ += L" · " + sanitize_text(completion->summary,1500);
-        append_output(L"\r\nSTATO FINALE: " + finalSummary_ + L"\r\n" +
-            (reportPath_.empty() ? L"Report completo non disponibile.\r\n" : L"Report completo: " + reportPath_.wstring() + L"\r\n"));
+        finalState_ = allComplete ? FinalState::Complete : (completion->cancelled ? FinalState::Cancelled : FinalState::Partial);
+        {
+            // A language change updates window chrome, never the active report's language.
+            const ScopedLanguage reportLanguage(scanLanguage_);
+            auto summary = final_status();
+            if (!completion->summary.empty()) summary += L" · " + sanitize_text(completion->summary,1500);
+            append_output(tr(L"\r\nSTATO FINALE: ", L"\r\nFINAL STATUS: ") + summary + L"\r\n" +
+                (reportPath_.empty() ? std::wstring(tr(L"Report completo non disponibile.\r\n", L"Full report is unavailable.\r\n")) :
+                    tr(L"Report completo: ", L"Full report: ") + reportPath_.wstring() + L"\r\n"));
+        }
         if (results_) {
             EnableWindow(GetDlgItem(results_,kCancelScan),FALSE);
             EnableWindow(GetDlgItem(results_,kSave),!reportPath_.empty());
@@ -697,9 +783,9 @@ void Application::update_scan_status() {
     const auto seconds = elapsed.count();
     wchar_t duration[64]{};
     swprintf_s(duration,L"%02lld:%02lld:%02lld",seconds/3600,(seconds/60)%60,seconds%60);
-    std::wstring state = scanning_ ? (cancellationRequested_ ? L"Annullamento in corso…" : L"In corso — motore, fase e avanzamento nel testo") : finalSummary_;
-    if (state.empty()) state = L"Nessuna scansione avviata";
-    const std::wstring label = L"Tempo trascorso: " + std::wstring(duration) + L"  |  " + state;
+    std::wstring state = scanning_ ? (cancellationRequested_ ? tr(L"Annullamento in corso…", L"Cancelling…") :
+        tr(L"In corso — motore, fase e avanzamento nel testo", L"Running — engine, phase and progress in output")) : final_status();
+    const std::wstring label = tr(L"Tempo trascorso: ", L"Elapsed time: ") + std::wstring(duration) + L"  |  " + state;
     SetDlgItemTextW(results_,kScanStatus,label.c_str());
 }
 
@@ -720,19 +806,21 @@ void Application::save_report() {
     std::copy(std::begin(defaultName),std::end(defaultName),path.begin());
     OPENFILENAMEW selection{sizeof(selection)};
     selection.hwndOwner=results_;
-    selection.lpstrFilter=L"Report di testo (*.txt)\0*.txt\0Tutti i file (*.*)\0*.*\0\0";
+    selection.lpstrFilter=tr(L"Report di testo (*.txt)\0*.txt\0Tutti i file (*.*)\0*.*\0\0", L"Text reports (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0");
     selection.lpstrFile=path.data();
     selection.nMaxFile=static_cast<DWORD>(path.size());
     selection.lpstrDefExt=L"txt";
     selection.lpstrInitialDir=kRoot;
-    selection.lpstrTitle=L"Salva il report completo";
+    selection.lpstrTitle=tr(L"Salva il report completo", L"Save the full report");
     selection.Flags=OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_EXPLORER;
     if (!GetSaveFileNameW(&selection)) return;
     const std::filesystem::path destination(path.data());
     std::error_code ec;
     if (std::filesystem::equivalent(reportPath_,destination,ec)) return;
     if (!CopyFileW(reportPath_.c_str(),destination.c_str(),FALSE)) {
-        MessageBoxW(results_,L"Impossibile copiare il report nella destinazione scelta. Il file originale resta nella cartella data.",L"Scaping — salvataggio report",MB_OK | MB_ICONERROR);
+        MessageBoxW(results_,tr(L"Impossibile copiare il report nella destinazione scelta. Il file originale resta nella cartella data.",
+            L"Unable to copy the report to the selected destination. The original file remains in the data folder."),
+            tr(L"Scaping — salvataggio report", L"Scaping — save report"),MB_OK | MB_ICONERROR);
     }
 }
 
@@ -758,13 +846,13 @@ void Application::restart_ping() {
 void Application::update_tray(bool add) {
     if (!resident_ || shuttingDown_) return;
     std::wstring tooltip;
-    if (config_.ip.empty()) tooltip=L"IP non configurato";
-    else if (suspended_) tooltip=config_.ip+L" · Monitoraggio sospeso";
-    else if (!lastPing_) tooltip=config_.ip+L" · In attesa del primo risultato";
-    else if (lastPing_->success) tooltip=config_.ip + (color_ == PingColor::Orange ? L" · Ping lento · " : L" · Ping OK · ") + std::to_wstring(lastPing_->rttMs)+L" ms";
+    if (config_.ip.empty()) tooltip=tr(L"IP non configurato", L"IP not configured");
+    else if (suspended_) tooltip=config_.ip+tr(L" · Monitoraggio sospeso", L" · Monitoring suspended");
+    else if (!lastPing_) tooltip=config_.ip+tr(L" · In attesa del primo risultato", L" · Waiting for first result");
+    else if (lastPing_->success) tooltip=config_.ip + (color_ == PingColor::Orange ? tr(L" · Ping lento · ", L" · Slow ping · ") : L" · Ping OK · ") + std::to_wstring(lastPing_->rttMs)+L" ms";
     else {
-        tooltip=config_.ip+L" · Ping KO: "+sanitize_text(lastPing_->error.empty() ? L"errore ICMP" : lastPing_->error,60);
-        if (lastRtt_) tooltip+=L" · Ultimo RTT "+std::to_wstring(*lastRtt_)+L" ms";
+        tooltip=config_.ip+tr(L" · Ping KO: ", L" · Ping failed: ")+sanitize_text(lastPing_->error.empty() ? tr(L"errore ICMP", L"ICMP error") : lastPing_->error,60);
+        if (lastRtt_) tooltip+=tr(L" · Ultimo RTT ", L" · Last RTT ")+std::to_wstring(*lastRtt_)+L" ms";
     }
     if (tooltip.size()>127) tooltip.resize(127);
     NOTIFYICONDATAW icon{sizeof(icon)};
@@ -791,9 +879,9 @@ void Application::update_tray(bool add) {
 void Application::tray_menu(POINT point) {
     OwnedMenu menu(CreatePopupMenu());
     if (!menu) return;
-    AppendMenuW(menu.get(),MF_STRING,kExit,L"Chiudi");
-    AppendMenuW(menu.get(),MF_STRING,kConfigure,L"Configura IP");
-    AppendMenuW(menu.get(),MF_STRING,kScan,L"Scansiona TUTTE le porte");
+    AppendMenuW(menu.get(),MF_STRING,kExit,tr(L"Chiudi", L"Exit"));
+    AppendMenuW(menu.get(),MF_STRING,kConfigure,tr(L"Configura IP", L"Configure IP"));
+    AppendMenuW(menu.get(),MF_STRING,kScan,tr(L"Scansiona TUTTE le porte", L"Scan ALL ports"));
     if (point.x==-1 && point.y==-1) GetCursorPos(&point);
     SetForegroundWindow(resident_);
     const UINT choice=TrackPopupMenuEx(menu.get(),TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
@@ -861,7 +949,11 @@ LRESULT CALLBACK Application::resident_proc(HWND window,UINT message,WPARAM wpar
                 app->suspended_=true;
                 app->restart_ping();
                 if (app->scanning_) {
-                    app->append_output(L"\r\n[Sospensione del sistema: scansione annullata, risultato parziale.]\r\n");
+                    {
+                        const ScopedLanguage reportLanguage(app->scanLanguage_);
+                        app->append_output(tr(L"\r\n[Sospensione del sistema: scansione annullata, risultato parziale.]\r\n",
+                            L"\r\n[System suspend: scan cancelled, partial result.]\r\n"));
+                    }
                     app->cancel_scan();
                 }
             } else if (wparam==PBT_APMRESUMEAUTOMATIC || wparam==PBT_APMRESUMESUSPEND) {
@@ -876,7 +968,7 @@ LRESULT CALLBACK Application::resident_proc(HWND window,UINT message,WPARAM wpar
         case WM_DESTROY: app->resident_=nullptr; PostQuitMessage(0); return 0;
         }
     } catch (...) {
-        MessageBoxW(window,L"Operazione non riuscita. Verifica le risorse di sistema e la configurazione.",L"Scaping",MB_OK | MB_ICONERROR);
+        MessageBoxW(window,tr(L"Operazione non riuscita. Verifica le risorse di sistema e la configurazione.", L"Operation failed. Check system resources and configuration."),L"Scaping",MB_OK | MB_ICONERROR);
         return 0;
     }
     return DefWindowProcW(window,message,wparam,lparam);
@@ -904,7 +996,7 @@ LRESULT CALLBACK Application::config_proc(HWND window,UINT message,WPARAM wparam
         }
     } catch (...) {
         if (message==WM_CREATE) return -1;
-        MessageBoxW(window,L"Impossibile completare l'operazione di configurazione.",L"Scaping",MB_OK | MB_ICONERROR);
+        MessageBoxW(window,tr(L"Impossibile completare l'operazione di configurazione.", L"Unable to complete the configuration operation."),L"Scaping",MB_OK | MB_ICONERROR);
         return 0;
     }
     return DefWindowProcW(window,message,wparam,lparam);
@@ -938,7 +1030,7 @@ LRESULT CALLBACK Application::results_proc(HWND window,UINT message,WPARAM wpara
         }
     } catch (...) {
         if (message==WM_CREATE) return -1;
-        MessageBoxW(window,L"Impossibile completare l'operazione sui risultati. Il report completo resta su disco.",L"Scaping",MB_OK | MB_ICONERROR);
+        MessageBoxW(window,tr(L"Impossibile completare l'operazione sui risultati. Il report completo resta su disco.", L"Unable to complete the results operation. The full report remains on disk."),L"Scaping",MB_OK | MB_ICONERROR);
         return 0;
     }
     return DefWindowProcW(window,message,wparam,lparam);
@@ -948,7 +1040,7 @@ LRESULT CALLBACK Application::results_proc(HWND window,UINT message,WPARAM wpara
 int run_gui(HINSTANCE instance) {
     Application application(instance);
     if (!application.initialize()) {
-        MessageBoxW(nullptr,L"Impossibile inizializzare Scaping o la system tray.",L"Scaping",MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr,tr(L"Impossibile inizializzare Scaping o la system tray.", L"Unable to initialize Scaping or the system tray."),L"Scaping",MB_OK | MB_ICONERROR);
         return 1;
     }
     return application.loop();

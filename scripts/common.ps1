@@ -12,10 +12,10 @@ function Find-CMake {
             if (Test-Path -LiteralPath $candidate) { return $candidate }
         }
     }
-    throw 'CMake non trovato. Installare Visual Studio 2022 Build Tools con Desktop development with C++ e C++ CMake tools for Windows.'
+    throw 'CMake not found. Install Visual Studio 2022 Build Tools with Desktop development with C++ and C++ CMake tools for Windows.'
 }
 function Invoke-Checked {
     param([Parameter(Mandatory)][string]$File, [string[]]$Arguments)
     & $File @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "Comando fallito ($LASTEXITCODE): $File" }
+    if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $File" }
 }

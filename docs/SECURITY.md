@@ -1,38 +1,46 @@
-# Confini di sicurezza e ciclo di vita
+# Security boundaries and lifecycle
 
-## Resident e input
+[English](SECURITY.md) · [Italiano](SECURITY.it.md) · [README](../README.md)
 
-Il manifest richiede `asInvoker`. La UI e il ping non richiedono amministratore. L'IP è un singolo IPv4 numerico validato; non sono ammessi host, subnet, liste o comandi. Il target di ogni scansione è una copia della configurazione al momento dell'avvio.
+## Resident application and input
 
-I figli Nmap usano `CreateProcessW` con eseguibile assoluto e quoting Windows degli argomenti; il worker temporaneo viene avviato con `ShellExecuteExW` e verbo `runas`. Nessun comando passa da shell, `system()`, `cmd.exe` o PowerShell. I profili non accettano opzioni aggiuntive dall'IPC o dalla configurazione.
+The manifest requests `asInvoker`. The interface and ping monitor do not require administrator privileges. The target is a single validated numeric IPv4 address; hostnames, subnets, lists, and commands are rejected. Each scan copies its target and language from the configuration when it starts.
 
-Il percorso Nmap manuale viene verificato come file PE locale chiamato `nmap.exe`, e interrogato con `--version`. Scegliere un eseguibile significa autorizzarne l'esecuzione con i propri privilegi. Il rilevamento automatico usa solo `Program Files\Nmap`, verificando l'installazione protetta; non cerca nella working directory o nel PATH.
+Nmap child processes use `CreateProcessW` with an absolute executable path and Windows argument quoting. The temporary worker is launched with `ShellExecuteExW` and the `runas` verb. No command passes through a shell, `system()`, `cmd.exe`, or PowerShell. Profiles accept no extra options through IPC or configuration.
 
-L'XML viene letto entro un limite di 64 MiB da una copia immutabile. Il solo DOCTYPE inerte esatto emesso normalmente da Nmap viene rimosso; tutte le altre dichiarazioni DTD/entità sono rifiutate. XmlLite ha DTD proibiti e resolver nullo. Sono limitati profondità, attributi e risultati; protocolli, porte, conteggi, target e fine positiva sono verificati prima di dichiarare copertura completa.
+A manually selected Nmap path is checked for a local PE executable named `nmap.exe` and queried with `--version`. Selecting an executable authorizes it to run with the user's privileges. Automatic detection uses only `Program Files\Nmap` and checks that the installation is protected; it does not search the working directory or PATH.
 
-Stdout/stderr e banner non attendibili sono neutralizzati per la visualizzazione. Un banner passivo non diventa automaticamente un'identificazione di servizio. L'output originale e i report restano in `data`; i buffer UI e IPC sono limitati.
+XML is read from an immutable copy with a 64 MiB limit. Only the exact inert DOCTYPE normally emitted by Nmap is removed; all other DTD and entity declarations are rejected. XmlLite prohibits DTDs and uses a null resolver. Depth, attributes, and results are bounded. Protocols, ports, counts, the target, and successful completion are checked before full coverage is declared.
 
-## Worker UAC temporaneo
+Untrusted stdout, stderr, and banners are sanitized for display. A passive banner does not automatically become a service identification. Original output and reports remain under `data`; interface and IPC buffers are bounded.
 
-Il worker esiste solo per una fase che richiede privilegi. Accetta PID/tempo di creazione del padre e nonce; dal canale riceve esclusivamente una richiesta versionata con IPv4 e profilo fisso. Non riceve percorsi eseguibili, percorsi di scrittura o argomenti liberi.
+## Configuration and language
 
-Il canale named pipe usa nonce casuale, ACL del solo utente corrente, rifiuta connessioni remote e verifica i PID dei peer. Il worker controlla che il padre sia vivo, abbia lo stesso SID e lo stesso percorso eseguibile, oltre al tempo di creazione del processo. La connessione usa un livello SQOS che impedisce al server non elevato di impersonare il token elevato.
+Configuration schema version 2 stores the language as `it` or `en`. Version 1 configuration files are loaded in Italian while preserving the target and all other settings. Migration is performed in memory, with schema version 2 written on the next successful atomic save. Changing the language does not select a new target.
 
-L'elevazione richiede il token amministrativo dello **stesso utente**. Un consenso fornito con credenziali di un diverso account amministratore è intenzionalmente rifiutato. L'app non cambia l'account o riduce queste verifiche.
+The initial, unconfigured state allows saving a language choice with an empty IP and produces no network traffic. Once a target is configured, applying settings requires a valid IPv4 address. A running scan keeps both its original target and language. Changing the interface language does not alter its work or rewrite previously collected output. Protocol tokens, process arguments, XML data, banners, and external tool output are never translated.
 
-Nmap elevato è selezionato nuovamente dal worker solo nella directory predefinita protetta. Proprietario e DACL di directory, eseguibile e file dell'installazione devono essere amministrativi; reparse point e ACL non verificabili sono rifiutati. Una firma presente ma non valida viene rifiutata. Un Nmap non firmato installato da un amministratore può essere accettato sulla base dell'intero albero protetto da ACL; non si presenta tale verifica come una firma digitale.
+## Temporary UAC worker
 
-Il worker costruisce un ambiente ridotto, scrive XML in una directory amministrativa temporanea privata e lo restituisce a frame limitati. È il padre non elevato a salvare il report richiesto, evitando scritture privilegiate verso percorsi forniti dall'utente.
+The worker exists only for a phase that needs additional privileges. Its command line accepts the parent's PID, creation time, and a nonce. Its channel accepts only a versioned request with an IPv4 address, a validated language identifier, and a fixed profile. It accepts no executable paths, output paths, or free-form arguments.
 
-Ogni figlio viene creato sospeso, assegnato a un Job Object con `KILL_ON_JOB_CLOSE` e quindi avviato. La lista degli handle ereditati è esplicita. Il worker controlla la vita del padre e la connessione IPC: annullamento, disconnessione o uscita del padre terminano il Job e i figli. Un consenso UAC lasciato senza risposta non blocca la chiusura della UI: il lancio usa stato condiviso isolato e, se il consenso arriva tardi, il worker deve ancora trovare padre e pipe originali validi prima di procedere.
+The named pipe uses a random nonce and an ACL restricted to the current user, rejects remote clients, and verifies peer PIDs. The worker checks that its parent is alive and has the same SID, executable path, and expected creation time. The connection uses an SQOS level that prevents the unelevated server from impersonating the elevated token.
 
-## Limiti espliciti
+Elevation requires the administrative token of the **same user**. Consent supplied with a different administrator account is intentionally rejected. The application does not switch accounts or relax these checks.
 
-- Npcap viene interrogato, non installato o avviato dall'app. La disponibilità del servizio non garantisce il permesso di aprire un dispositivo; l'esito di Nmap resta determinante.
-- Rifiuto UAC, dipendenza assente, XML non valido o fase fallita producono stato parziale. Nessun esito UDP viene ricavato dal silenzio di un socket nativo.
-- Non esiste una cancellazione ICMP documentata usata da SCAPING: dopo **Chiudi** il processo può attendere il timeout residuo dell'unico ping pendente (800 ms iniziali, fino al limite configurato di 60 s). Tray e finestre sono rimosse e la scansione viene annullata; buffer/handle ICMP restano validi fino al completamento del sistema operativo.
-- Il programma non promette anonimato dell'account Git proprietario. La protezione riguarda contenuti, configurazioni, metadati di commit e pacchetti.
+The worker independently selects elevated Nmap from the protected default installation directory. The owner and DACL of the directory, executable, and installation files must be administratively controlled. Reparse points and unverifiable ACLs are rejected. A present but invalid signature is rejected. An unsigned Nmap installed by an administrator may be accepted based on protection of its entire installation tree; this ACL check is not described as a digital signature.
 
-## Revisione prima della pubblicazione
+The worker builds a reduced environment, writes XML to a private administrative temporary directory, and returns it in bounded frames. The unelevated parent saves the requested report, avoiding privileged writes to user-supplied paths.
 
-Usare `scripts\privacy-check.ps1` dopo lo staging. Con `-GitleaksPath <percorso>` vengono controllati anche diff staged e cronologia mediante Gitleaks. Verificare comunque a mano file tracciati, metadati autore/committer e allow-list del pacchetto. Non aggiungere configurazioni, report, output di test locali o conversazioni al repository.
+Each child is created suspended, assigned to a Job Object with `KILL_ON_JOB_CLOSE`, and then started. The inherited handle list is explicit. The worker monitors its parent and IPC connection: cancellation, disconnection, or parent exit terminates the Job and its children. An unanswered UAC prompt does not block interface shutdown. The launch uses isolated shared state; if consent arrives late, the worker must still find the original parent and pipe valid before proceeding.
+
+## Explicit limitations
+
+- SCAPING queries Npcap; it does not install or start it. Service availability does not guarantee permission to open a device, so Nmap's actual result remains decisive.
+- Declined UAC, missing dependencies, invalid XML, or a failed phase produces a partial result. UDP results are never inferred from silence on a native socket.
+- SCAPING does not use a documented ICMP cancellation mechanism. After **Exit**, the process may wait for the remaining timeout of its one outstanding ping: initially 800 ms, up to the configured limit of 60 seconds. The tray icon and windows are removed and the scan is cancelled; ICMP buffers and handles remain valid until the operating system completes the request.
+- The application does not promise anonymity of the Git repository owner's account. Its privacy measures cover repository contents, configuration, commit metadata, and packages.
+
+## Review before publication
+
+Run `scripts\privacy-check.ps1` after staging. With `-GitleaksPath <path>`, Gitleaks also checks the staged diff and history. Manually review tracked files, author and committer metadata, and the package allow-list as well. Do not add local settings, reports, local test output, or conversations to the repository.

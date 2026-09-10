@@ -9,5 +9,5 @@ if ($Configuration -eq 'Release') {
     $binary = Join-Path $build 'Release\scaping.exe'
     $destination = Join-Path $ProjectRoot 'scaping.exe'
     Copy-Item -LiteralPath $binary -Destination $destination -Force
-    Write-Host "Eseguibile: $destination"
+    Write-Host "Executable: $destination"
 }

@@ -19,11 +19,20 @@
 namespace scaping::net {
 std::wstring win_error(DWORD error) {
     wchar_t* message = nullptr;
-    DWORD count = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, reinterpret_cast<wchar_t*>(&message), 0, nullptr);
-    std::wstring text = count ? sanitize_text(std::wstring_view(message, count), 512) : L"Errore " + std::to_wstring(error);
+    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+    const LANGID requested = current_language() == Language::English ? MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US) :
+        MAKELANGID(LANG_ITALIAN, SUBLANG_ITALIAN);
+    DWORD count = FormatMessageW(flags, nullptr, error, requested, reinterpret_cast<wchar_t*>(&message), 0, nullptr);
+    bool nativeFallback = false;
+    if (!count) {
+        if (message) { LocalFree(message); message = nullptr; }
+        count = FormatMessageW(flags, nullptr, error, 0, reinterpret_cast<wchar_t*>(&message), 0, nullptr);
+        nativeFallback = count != 0;
+    }
+    std::wstring text = count ? sanitize_text(std::wstring_view(message, count), 512) : tr(L"Errore ", L"Error ") + std::to_wstring(error);
     if (message) LocalFree(message);
     while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ')) text.pop_back();
+    if (nativeFallback) text = tr(L"Messaggio di sistema: ", L"System message: ") + text;
     return text;
 }
 bool process_elevated() {
@@ -191,9 +200,9 @@ std::wstring display_banner(std::string_view bytes) {
 }
 PortResult socket_result(std::uint32_t port, int error) {
     PortResult result; result.port = port;
-    if (error == WSAECONNREFUSED) { result.state = L"closed"; result.reason = L"Connessione TCP rifiutata"; }
-    else if (error == WSAETIMEDOUT) { result.state = L"filtered"; result.reason = L"Timeout: esito incerto; non prova che la porta sia chiusa"; }
-    else { result.state = L"unknown"; result.reason = L"Errore TCP locale o di rete " + std::to_wstring(error) + L": " + win_error(error); }
+    if (error == WSAECONNREFUSED) { result.state = L"closed"; result.reason = tr(L"Connessione TCP rifiutata", L"TCP connection refused"); }
+    else if (error == WSAETIMEDOUT) { result.state = L"filtered"; result.reason = tr(L"Timeout: esito incerto; non prova che la porta sia chiusa", L"Timeout: uncertain result; this does not prove that the port is closed"); }
+    else { result.state = L"unknown"; result.reason = tr(L"Errore TCP locale o di rete ", L"Local or network TCP error ") + std::to_wstring(error) + L": " + win_error(error); }
     return result;
 }
 }
@@ -204,7 +213,7 @@ TcpRunResult run_tcp_range(const Config& config, std::uint32_t first, std::uint3
     if (!valid_ipv4(config.ip) || first > last || last >= kPortCount || config.concurrency < 1 ||
         config.concurrency > 256 || config.connectionsPerSecond < 1 || config.connectionsPerSecond > 1024) return stats;
     Winsock winsock;
-    if (!winsock.ok) { if (progress) progress(L"Winsock non disponibile; scansione parziale.\r\n"); return stats; }
+    if (!winsock.ok) { if (progress) progress(tr(L"Winsock non disponibile; scansione parziale.\r\n", L"Winsock unavailable; partial scan.\r\n")); return stats; }
     sockaddr_in target{}; target.sin_family = AF_INET;
     if (InetPtonW(AF_INET, config.ip.c_str(), &target.sin_addr) != 1) return stats;
     std::vector<Connection> active; active.reserve(config.concurrency);
@@ -276,15 +285,16 @@ TcpRunResult run_tcp_range(const Config& config, std::uint32_t first, std::uint3
                 if (bannerDone || now - connection.began >= bannerTimeout) {
                     PortResult result; result.port = connection.port; result.state = L"open";
                     result.banner = display_banner(connection.banner);
-                    result.reason = L"Connessione TCP riuscita; lettura passiva max 2048 byte / 300 ms; nessuna sonda applicativa";
+                    result.reason = tr(L"Connessione TCP riuscita; lettura passiva max 2048 byte / 300 ms; nessuna sonda applicativa",
+                        L"TCP connection succeeded; passive read limited to 2048 bytes / 300 ms; no application probes");
                     emit(std::move(result)); finished = true;
                 }
             }
             if (finished) active.erase(active.begin() + static_cast<std::ptrdiff_t>(i - 1));
         }
         if (progress && now - lastProgress >= 2000) {
-            progress(L"TCP: " + std::to_wstring(stats.completed) + L" / " + std::to_wstring(last - first + 1) + L" esiti; " +
-                std::to_wstring(stats.open) + L" aperte, " + std::to_wstring(stats.uncertain) + L" incerti.\r\n");
+            progress(L"TCP: " + std::to_wstring(stats.completed) + L" / " + std::to_wstring(last - first + 1) + tr(L" esiti; ", L" results; ") +
+                std::to_wstring(stats.open) + tr(L" aperte, ", L" open, ") + std::to_wstring(stats.uncertain) + tr(L" incerti.\r\n", L" uncertain.\r\n"));
             lastProgress = now;
         }
         DWORD delay = 10;
@@ -321,16 +331,16 @@ std::vector<std::filesystem::path> installed_nmap_paths() {
 bool inspect_nmap_path(const std::filesystem::path& input, std::filesystem::path& output, std::wstring& diagnostic) {
     std::error_code error;
     if (!input.is_absolute() || input.native().starts_with(L"\\\\") || _wcsicmp(input.filename().c_str(), L"nmap.exe") != 0) {
-        diagnostic = L"Nmap deve essere un file locale assoluto denominato nmap.exe."; return false;
+        diagnostic = tr(L"Nmap deve essere un file locale assoluto denominato nmap.exe.", L"Nmap must be a local absolute file path named nmap.exe."); return false;
     }
     output = std::filesystem::canonical(input, error);
-    if (error || !std::filesystem::is_regular_file(output, error)) { diagnostic = L"Eseguibile Nmap non trovato."; return false; }
+    if (error || !std::filesystem::is_regular_file(output, error)) { diagnostic = tr(L"Eseguibile Nmap non trovato.", L"Nmap executable not found."); return false; }
     DWORD type = 0;
     if (!GetBinaryTypeW(output.c_str(), &type) || (type != SCS_32BIT_BINARY && type != SCS_64BIT_BINARY)) {
-        diagnostic = L"Il percorso Nmap non contiene un eseguibile Windows valido."; return false;
+        diagnostic = tr(L"Il percorso Nmap non contiene un eseguibile Windows valido.", L"The Nmap path does not contain a valid Windows executable."); return false;
     }
     auto size = std::filesystem::file_size(output, error);
-    if (error || size < 4096 || size > 256 * 1024 * 1024) { diagnostic = L"Dimensione dell'eseguibile Nmap non valida."; return false; }
+    if (error || size < 4096 || size > 256 * 1024 * 1024) { diagnostic = tr(L"Dimensione dell'eseguibile Nmap non valida.", L"Invalid Nmap executable size."); return false; }
     return true;
 }
 bool npcap_admin_only() {
@@ -340,15 +350,16 @@ bool npcap_admin_only() {
 }
 bool npcap_installed(std::wstring& description) {
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!manager) { description = L"Impossibile interrogare Npcap: " + net::win_error(GetLastError()); return false; }
+    if (!manager) { description = tr(L"Impossibile interrogare Npcap: ", L"Unable to query Npcap: ") + net::win_error(GetLastError()); return false; }
     SC_HANDLE service = OpenServiceW(manager, L"npcap", SERVICE_QUERY_STATUS);
-    if (!service) { CloseServiceHandle(manager); description = L"Npcap non installato o non accessibile; UDP non disponibile."; return false; }
+    if (!service) { CloseServiceHandle(manager); description = tr(L"Npcap non installato o non accessibile; UDP non disponibile.", L"Npcap is not installed or is inaccessible; UDP is unavailable."); return false; }
     SERVICE_STATUS_PROCESS status{}; DWORD bytes = 0;
     bool queried = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&status), sizeof(status), &bytes) != FALSE;
     CloseServiceHandle(service); CloseServiceHandle(manager);
-    description = queried && status.dwCurrentState == SERVICE_RUNNING ? L"Servizio Npcap in esecuzione." : L"Npcap installato; driver non confermato in esecuzione.";
+    description = queried && status.dwCurrentState == SERVICE_RUNNING ? tr(L"Servizio Npcap in esecuzione.", L"Npcap service is running.") :
+        tr(L"Npcap installato; driver non confermato in esecuzione.", L"Npcap is installed; the driver is not confirmed running.");
     if (npcap_admin_only())
-        description += L" Accesso Npcap limitato agli amministratori; può servire UAC.";
+        description += tr(L" Accesso Npcap limitato agli amministratori; può servire UAC.", L" Npcap access is restricted to administrators; UAC may be required.");
     return true;
 }
 struct ReportSink {
@@ -397,9 +408,9 @@ std::filesystem::path create_report_directory() {
     std::filesystem::create_directories(base);
     SYSTEMTIME time{}; GetLocalTime(&time); wchar_t stamp[64]{};
     swprintf_s(stamp, L"%04u%02u%02u-%02u%02u%02u", time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond);
-    auto nonce = net::random_token(); if (nonce.empty()) throw std::runtime_error("random failure");
+    auto nonce = net::random_token(); if (nonce.empty()) throw std::runtime_error(to_utf8(tr(L"generazione casuale non riuscita", L"random generation failed")));
     auto path = base / (std::wstring(stamp) + L"-" + nonce.substr(0, 8));
-    if (!std::filesystem::create_directory(path)) throw std::runtime_error("report directory failure");
+    if (!std::filesystem::create_directory(path)) throw std::runtime_error(to_utf8(tr(L"creazione della cartella report non riuscita", L"report directory creation failed")));
     return path;
 }
 }
@@ -422,19 +433,20 @@ NmapInfo detect_nmap(std::wstring_view configuredPath) {
             std::wstring decoded = sanitize_text(from_utf8(version), 65536);
             const auto marker = decoded.find(L"Nmap version ");
             if (result.error || result.cancelled || result.exitCode != 0 || marker == std::wstring::npos) {
-                info.diagnostic = L"Verifica Nmap --version fallita; uso fallback TCP."; continue;
+                info.diagnostic = tr(L"Verifica Nmap --version fallita; uso fallback TCP.", L"Nmap --version verification failed; using native TCP fallback."); continue;
             }
             std::wstring majorText = decoded.substr(marker + 13, 4); wchar_t* end = nullptr;
             auto major = wcstoul(majorText.c_str(), &end, 10);
-            if (end == majorText.c_str() || major < 7) { info.diagnostic = L"Profilo completo richiede Nmap 7 o successivo."; continue; }
+            if (end == majorText.c_str() || major < 7) { info.diagnostic = tr(L"Profilo completo richiede Nmap 7 o successivo.", L"The full scan profile requires Nmap 7 or later."); continue; }
             auto newline = decoded.find_first_of(L"\r\n", marker);
             info.available = true; info.path = path.native(); info.version = decoded.substr(marker, newline - marker);
             info.diagnostic = info.version + L". " + npcap + (trustDiagnostic.empty() ? L"" : L" " + trustDiagnostic);
-            if (!configuredPath.empty()) info.diagnostic += L" Percorso selezionato manualmente: esecuzione ordinaria senza elevazione automatica di file non attendibili.";
+            if (!configuredPath.empty()) info.diagnostic += tr(L" Percorso selezionato manualmente: esecuzione ordinaria senza elevazione automatica di file non attendibili.",
+                L" Manually selected path: ordinary execution without automatic elevation of untrusted files.");
             return info;
         }
-    } catch (...) { info.diagnostic = L"Errore durante il rilevamento Nmap."; }
-    if (info.diagnostic.empty()) info.diagnostic = L"Nmap non disponibile.";
+    } catch (...) { info.diagnostic = tr(L"Errore durante il rilevamento Nmap.", L"Error while detecting Nmap."); }
+    if (info.diagnostic.empty()) info.diagnostic = tr(L"Nmap non disponibile.", L"Nmap is unavailable.");
     info.diagnostic += L" " + npcap; return info;
 }
 
@@ -447,7 +459,7 @@ struct PingMonitor::Impl {
     net::Handle changed{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     std::thread thread;
     Impl() {
-        if (!changed) throw std::runtime_error("ping event failure");
+        if (!changed) throw std::runtime_error(to_utf8(tr(L"creazione dell'evento ping non riuscita", L"ping event creation failed")));
         thread = std::thread([this] { run(); });
     }
     ~Impl() {
@@ -466,10 +478,11 @@ struct PingMonitor::Impl {
                 if (!enabled) cb = {};
             }
             if (!cb) { WaitForSingleObject(changed.value, INFINITE); continue; }
+            ScopedLanguage language(snapshot.language);
             PingResult result; result.generation = activeGeneration;
             ULONGLONG began = GetTickCount64();
             if (icmp.handle == INVALID_HANDLE_VALUE || !completed) {
-                result.errorCode = ERROR_INVALID_HANDLE; result.error = L"API ICMP non disponibile";
+                result.errorCode = ERROR_INVALID_HANDLE; result.error = tr(L"API ICMP non disponibile", L"ICMP API is unavailable");
             } else {
                 IN_ADDR address{}; InetPtonW(AF_INET, snapshot.ip.c_str(), &address);
                 alignas(ICMP_ECHO_REPLY) std::array<unsigned char, sizeof(ICMP_ECHO_REPLY) + 32 + 8> reply{};
@@ -489,7 +502,8 @@ struct PingMonitor::Impl {
                     result.success = echo->Status == IP_SUCCESS; result.rttMs = echo->RoundTripTime;
                     result.errorCode = echo->Status;
                 } else result.errorCode = error;
-                if (!result.success) result.error = result.errorCode == IP_REQ_TIMED_OUT ? L"Timeout ICMP: ping KO" : L"Ping KO: " + net::win_error(result.errorCode);
+                if (!result.success) result.error = result.errorCode == IP_REQ_TIMED_OUT ? tr(L"Timeout ICMP: ping KO", L"ICMP timeout: ping failed") :
+                    tr(L"Ping KO: ", L"Ping failed: ") + net::win_error(result.errorCode);
             }
             bool current = false;
             { std::lock_guard lock(mutex); current = !shutdown && enabled && revision == activeRevision; }
@@ -519,40 +533,46 @@ struct ScanSession::Impl {
     std::thread thread;
     ~Impl() { if (cancel) SetEvent(cancel.value); if (thread.joinable()) thread.join(); }
     void scan(Config snapshot, OutputCallback output, CompletionCallback done) {
+        ScopedLanguage language(snapshot.language);
         ScanCompletion completion;
         try {
             const auto directory = create_report_directory(); completion.reportPath = directory / L"report.txt";
             ReportSink sink(completion.reportPath, output);
-            if (!sink.good) throw std::runtime_error("report open failure");
-            sink.text(L"SCAPING — target: " + snapshot.ip + L"\r\nRichiesta: TCP e UDP, porte 0..65535 incluse.\r\n");
-            if (!sink.good) throw std::runtime_error("report write failure");
+            if (!sink.good) throw std::runtime_error(to_utf8(tr(L"apertura del report non riuscita", L"report opening failed")));
+            sink.text(L"SCAPING — target: " + snapshot.ip + tr(L"\r\nRichiesta: TCP e UDP, porte 0..65535 incluse.\r\n",
+                L"\r\nRequested: TCP and UDP, ports 0..65535 inclusive.\r\n"));
+            if (!sink.good) throw std::runtime_error(to_utf8(tr(L"scrittura del report non riuscita", L"report writing failed")));
             auto info = detect_nmap(snapshot.nmapPath);
             sink.text(info.diagnostic + L"\r\n");
             if (WaitForSingleObject(cancel.value, 0) == WAIT_OBJECT_0) completion.cancelled = true;
             else if (!info.available) {
-                sink.text(L"Solo TCP — modalità ridotta. Nessuna scansione UDP e nessun riconoscimento servizi.\r\n");
-                sink.text(L"Timeout connessione TCP: " + std::to_wstring((std::max)(3000U, snapshot.timeoutMs)) +
-                    L" ms (minimo 3000 ms, indipendente dal timeout ping più breve). Massimo " + std::to_wstring(snapshot.concurrency) +
-                    L" connessioni contemporanee, " + std::to_wstring(snapshot.connectionsPerSecond) + L" avvii/s.\r\n");
+                sink.text(tr(L"Solo TCP — modalità ridotta. Nessuna scansione UDP e nessun riconoscimento servizi.\r\n",
+                    L"TCP only — reduced mode. No UDP scan or service identification.\r\n"));
+                sink.text(tr(L"Timeout connessione TCP: ", L"TCP connection timeout: ") + std::to_wstring((std::max)(3000U, snapshot.timeoutMs)) +
+                    tr(L" ms (minimo 3000 ms, indipendente dal timeout ping più breve). Massimo ",
+                        L" ms (3000 ms minimum, independent of a shorter ping timeout). Up to ") + std::to_wstring(snapshot.concurrency) +
+                    tr(L" connessioni contemporanee, ", L" concurrent connections, ") + std::to_wstring(snapshot.connectionsPerSecond) + tr(L" avvii/s.\r\n", L" starts/s.\r\n"));
                 auto stats = net::run_tcp_range(snapshot, 0, kPortCount - 1, cancel.value,
                     [&](const PortResult& result) { sink.text(format_port(result) + L"\r\n"); if (!sink.good) SetEvent(cancel.value); },
                     [&](std::wstring text) { sink.text(text); });
                 completion.cancelled = stats.cancelled;
                 completion.tcpComplete = stats.completed == kPortCount && !stats.cancelled;
-                completion.summary = L"PARZIALE — Solo TCP — modalità ridotta. TCP: " + std::to_wstring(stats.completed) +
-                    L" / 65536 esiti; aperte " + std::to_wstring(stats.open) + L", chiuse " + std::to_wstring(stats.closed) +
-                    L", incerte " + std::to_wstring(stats.uncertain) + L". UDP non eseguito; servizi non identificati.";
+                completion.summary = tr(L"PARZIALE — Solo TCP — modalità ridotta. TCP: ", L"PARTIAL — TCP only — reduced mode. TCP: ") + std::to_wstring(stats.completed) +
+                    tr(L" / 65536 esiti; aperte ", L" / 65536 results; open ") + std::to_wstring(stats.open) + tr(L", chiuse ", L", closed ") + std::to_wstring(stats.closed) +
+                    tr(L", incerte ", L", uncertain ") + std::to_wstring(stats.uncertain) + tr(L". UDP non eseguito; servizi non identificati.", L". UDP was not scanned; services were not identified.");
             } else {
                 std::ofstream versionFile(directory / L"nmap-version.txt", std::ios::binary);
                 versionFile << to_utf8(info.version);
-                versionFile.flush(); if (!versionFile) throw std::runtime_error("Nmap version file write failure");
+                versionFile.flush(); if (!versionFile) throw std::runtime_error(to_utf8(tr(L"scrittura del file versione Nmap non riuscita", L"writing the Nmap version file failed")));
                 bool servicesComplete = true;
                 for (const auto protocol : {Protocol::Tcp, Protocol::Udp}) {
                     if (WaitForSingleObject(cancel.value, 0) == WAIT_OBJECT_0) { completion.cancelled = true; break; }
                     const std::wstring name = protocol == Protocol::Tcp ? L"TCP" : L"UDP";
-                    if (protocol == Protocol::Udp && !info.npcapAvailable) { sink.text(L"UDP non eseguito: Npcap non disponibile. Stato finale PARZIALE.\r\n"); break; }
+                    if (protocol == Protocol::Udp && !info.npcapAvailable) { sink.text(tr(L"UDP non eseguito: Npcap non disponibile. Stato finale PARZIALE.\r\n",
+                        L"UDP was not scanned: Npcap is unavailable. Final status is PARTIAL.\r\n")); break; }
                     auto xml = directory / (protocol == Protocol::Tcp ? L"tcp.xml" : L"udp.xml");
-                    sink.text(L"\r\nFase " + name + L": 65536 porte; rilevamento servizi attivo. UDP può richiedere molto tempo.\r\n");
+                    sink.text(tr(L"\r\nFase ", L"\r\nPhase ") + name + tr(L": 65536 porte; rilevamento servizi attivo. UDP può richiedere molto tempo.\r\n",
+                        L": 65536 ports; service detection enabled. UDP can take a long time.\r\n"));
                     std::wstring tail;
                     auto capture = [&](std::string_view bytes) {
                         sink.raw(bytes); tail += from_utf8(bytes); if (tail.size() > 32768) tail.erase(0, tail.size() - 32768);
@@ -561,7 +581,8 @@ struct ScanSession::Impl {
                     net::ProcessResult result;
                     const bool elevatedFirst = protocol == Protocol::Udp && !info.elevated && npcap_admin_only();
                     if (elevatedFirst) {
-                        sink.text(L"Npcap AdminOnly: richiesta UAC al worker temporaneo prima della fase raw UDP.\r\n");
+                        sink.text(tr(L"Npcap AdminOnly: richiesta UAC al worker temporaneo prima della fase raw UDP.\r\n",
+                            L"Npcap AdminOnly: requesting UAC for the temporary worker before the raw UDP phase.\r\n"));
                         result = net::run_elevated_nmap(protocol, snapshot.ip, info.path, xml, cancel.value, capture);
                     } else result = net::run_process(info.path, nmap_arguments(protocol, snapshot.ip, xml),
                         std::filesystem::path(info.path).parent_path(), cancel.value, capture, INFINITE, nullptr, true);
@@ -570,39 +591,43 @@ struct ScanSession::Impl {
                         lower.find(L"requires root") != std::wstring::npos || lower.find(L"failed to open device") != std::wstring::npos ||
                         lower.find(L"dnet: failed") != std::wstring::npos || lower.find(L"access is denied") != std::wstring::npos;
                     if (result.exitCode != 0 && !result.cancelled && !info.elevated && !elevatedFirst && info.npcapAvailable && permissions) {
-                        sink.text(L"La fase " + name + L" richiede ulteriori permessi: richiesta UAC per worker temporaneo con profilo fisso.\r\n");
+                        sink.text(tr(L"La fase ", L"The ") + name + tr(L" richiede ulteriori permessi: richiesta UAC per worker temporaneo con profilo fisso.\r\n",
+                            L" phase requires additional permissions: requesting UAC for a temporary worker with a fixed profile.\r\n"));
                         result = net::run_elevated_nmap(protocol, snapshot.ip, info.path, xml, cancel.value, capture);
                     }
-                    if (result.cancelled) { completion.cancelled = true; sink.text(L"Fase " + name + L" interrotta.\r\n"); break; }
+                    if (result.cancelled) { completion.cancelled = true; sink.text(tr(L"Fase ", L"Phase ") + name + tr(L" interrotta.\r\n", L" interrupted.\r\n")); break; }
                     if (result.error || result.exitCode != 0) {
-                        sink.text(L"Fase " + name + L" non riuscita: " + net::win_error(result.error ? result.error : result.exitCode) + L".\r\n");
+                        sink.text(tr(L"Fase ", L"Phase ") + name + tr(L" non riuscita: ", L" failed: ") + net::win_error(result.error ? result.error : result.exitCode) + L".\r\n");
                     }
                     auto parsed = parse_nmap_xml(xml, protocol, snapshot.ip);
-                    sink.text(L"\r\nRisultati strutturati " + name + L":\r\n");
+                    sink.text(tr(L"\r\nRisultati strutturati ", L"\r\nStructured results for ") + name + L":\r\n");
                     for (const auto& port : parsed.ports) sink.text(format_port(port) + L"\r\n");
                     sink.text(parsed.summary + L"\r\n" + parsed.diagnostic + L"\r\n");
                     const bool coverage = !result.error && result.exitCode == 0 && parsed.valid && parsed.finished && parsed.coverageComplete;
                     servicesComplete = servicesComplete && coverage && parsed.serviceDetectionComplete;
-                    sink.text(name + L" copertura porte: " + (coverage ? L"65536 / 65536 verificata" : L"parziale o non verificabile") +
-                        L"; rilevamento servizi: " + (parsed.serviceDetectionComplete && coverage ? L"terminato (possono restare servizi non identificati)" : L"non completato/verificato") + L".\r\n");
+                    sink.text(name + tr(L" copertura porte: ", L" port coverage: ") + (coverage ? tr(L"65536 / 65536 verificata", L"65536 / 65536 verified") :
+                        tr(L"parziale o non verificabile", L"partial or unverifiable")) + tr(L"; rilevamento servizi: ", L"; service detection: ") +
+                        (parsed.serviceDetectionComplete && coverage ? tr(L"terminato (possono restare servizi non identificati)", L"finished (some services may remain unidentified)") :
+                        tr(L"non completato/verificato", L"not finished or verified")) + L".\r\n");
                     if (protocol == Protocol::Tcp) completion.tcpComplete = coverage; else completion.udpComplete = coverage;
                 }
                 completion.complete = completion.tcpComplete && completion.udpComplete && servicesComplete && !completion.cancelled;
-                completion.summary = completion.complete ? L"COMPLETATA — copertura TCP e UDP 0..65535 verificata; gli stati incerti restano incerti." :
-                    L"PARZIALE — TCP " + std::wstring(completion.tcpComplete ? L"coperto" : L"non completato") +
-                    L", UDP " + std::wstring(completion.udpComplete ? L"coperto" : L"non completato") + L".";
-                if (!servicesComplete) completion.summary += L" Rilevamento servizi non completato o non verificabile.";
+                completion.summary = completion.complete ? tr(L"COMPLETATA — copertura TCP e UDP 0..65535 verificata; gli stati incerti restano incerti.",
+                    L"COMPLETED — TCP and UDP coverage 0..65535 verified; uncertain states remain uncertain.") :
+                    tr(L"PARZIALE — TCP ", L"PARTIAL — TCP ") + std::wstring(completion.tcpComplete ? tr(L"coperto", L"covered") : tr(L"non completato", L"not completed")) +
+                    L", UDP " + std::wstring(completion.udpComplete ? tr(L"coperto", L"covered") : tr(L"non completato", L"not completed")) + L".";
+                if (!servicesComplete) completion.summary += tr(L" Rilevamento servizi non completato o non verificabile.", L" Service detection was not completed or cannot be verified.");
             }
-            if (completion.cancelled) { completion.complete = false; completion.summary = L"ANNULLATA — scansione PARZIALE. " + completion.summary; }
-            if (completion.summary.empty()) completion.summary = L"PARZIALE — scansione non eseguita.";
+            if (completion.cancelled) { completion.complete = false; completion.summary = tr(L"ANNULLATA — scansione PARZIALE. ", L"CANCELLED — PARTIAL scan. ") + completion.summary; }
+            if (completion.summary.empty()) completion.summary = tr(L"PARZIALE — scansione non eseguita.", L"PARTIAL — scan was not performed.");
             sink.text(L"\r\n" + completion.summary + L"\r\n");
             sink.report.flush(); sink.good = sink.good && sink.report.good();
-            if (!sink.good) { completion.complete = false; completion.summary += L" Errore scrittura report: output su disco incompleto."; }
+            if (!sink.good) { completion.complete = false; completion.summary += tr(L" Errore scrittura report: output su disco incompleto.", L" Report writing failed: disk output is incomplete."); }
             sink.finish();
         } catch (const std::exception& exception) {
-            completion.complete = false; completion.summary = L"PARZIALE — errore scansione: " + from_utf8(exception.what());
+            completion.complete = false; completion.summary = tr(L"PARZIALE — errore scansione: ", L"PARTIAL — scan error: ") + from_utf8(exception.what());
             if (output) { try { output(completion.summary + L"\r\n"); } catch (...) {} }
-        } catch (...) { completion.complete = false; completion.summary = L"PARZIALE — errore scansione inatteso."; }
+        } catch (...) { completion.complete = false; completion.summary = tr(L"PARZIALE — errore scansione inatteso.", L"PARTIAL — unexpected scan error."); }
         active.store(false);
         if (done) { try { done(std::move(completion)); } catch (...) {} }
     }

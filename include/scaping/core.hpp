@@ -1,4 +1,5 @@
 #pragma once
+#include "scaping/language.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -18,6 +19,7 @@ struct Config {
     std::wstring nmapPath;
     std::uint32_t concurrency = 64;
     std::uint32_t connectionsPerSecond = 128;
+    Language language = Language::Italian;
 };
 bool valid_ipv4(std::wstring_view ip);
 std::optional<std::wstring> validate_config(const Config& config, bool allowEmptyIp = false);

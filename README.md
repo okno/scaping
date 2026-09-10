@@ -1,12 +1,14 @@
 # SCAPING
 
-Monitor ICMP e inventario delle porte per Windows, scritto in C++20 e API Win32. L'applicazione risiede nella system tray e non apre console o finestre all'avvio. Non contiene telemetria, controlli aggiornamenti, servizi Windows o runtime web.
+[English](README.md) · [Italiano](README.it.md)
 
-## Requisiti e avvio
+An ICMP monitor and port inventory tool for Windows, built with C++20 and native Win32 APIs. The application runs in the system tray and opens no console or main window at startup. It contains no telemetry, automatic update checks, Windows services, or web runtime.
 
-Windows 10 x64 versione 1809 o successiva; eseguibile GUI con runtime C/C++ statico in Release. La compatibilità effettivamente provata e le misure sono in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+## Requirements and startup
 
-Cartella obbligatoria e working directory: `D:\scaping`. Eseguibile: `D:\scaping\scaping.exe`. L'app imposta esplicitamente questa directory anche se avviata altrove e mostra un errore se non è disponibile.
+Windows 10 x64 version 1809 or later. The Release build is a GUI executable with a statically linked C/C++ runtime. See [the verification record](docs/VERIFICATION.md) for the Windows version actually tested, test results, and measurements.
+
+Required project folder and working directory: `D:\scaping`. Executable: `D:\scaping\scaping.exe`. The application explicitly selects this working directory even when launched elsewhere and shows an error if it is unavailable.
 
 ```powershell
 powershell -NoProfile -File D:\scaping\scripts\build.ps1
@@ -15,78 +17,88 @@ powershell -NoProfile -File D:\scaping\scripts\package.ps1 -SkipBuild
 powershell -NoProfile -File D:\scaping\scripts\run.ps1
 ```
 
-I comandi di build, test e packaging si eseguono dal checkout dei sorgenti. Per compilare: Visual Studio 2022 Build Tools, workload **Desktop development with C++**, MSVC x64, Windows SDK e **C++ CMake tools for Windows**. CMake minimo 3.24. Gli script rilevano anche il CMake incluso in Visual Studio. La build Release copia l'eseguibile nella radice del progetto; chiudere SCAPING prima di ricompilare. Debug rimane in `build\Debug`.
+Run the build, test, and packaging commands from a source checkout. Building requires Visual Studio 2022 Build Tools with **Desktop development with C++**, MSVC x64, the Windows SDK, and **C++ CMake tools for Windows**. CMake 3.24 or later is required; the scripts also detect the CMake installation bundled with Visual Studio. The Release build copies the executable to the project root. Close SCAPING before rebuilding. Debug builds remain in `build\Debug`.
 
-Il pacchetto ZIP in `dist` contiene solo eseguibile, istruzioni, esempio neutro e script di deployment/avvio. Non comprende configurazioni locali, report, simboli, Nmap o Npcap. Estrarre il pacchetto e usare `scripts\deploy.ps1` per copiarne l'eseguibile in `D:\scaping`; lo script rifiuta di sovrascrivere un eseguibile già presente.
+The ZIP package in `dist` contains the executable, instructions, a neutral configuration example, and deployment/startup scripts. It excludes local settings, reports, symbols, Nmap, and Npcap. Extract the package and use `scripts\deploy.ps1` to copy the executable to `D:\scaping`; the script refuses to overwrite an existing executable.
 
-## Tray e monitoraggio
+## Language
 
-Al primo avvio il quadrato è grigio, con tooltip **IP non configurato**. Non viene contattato alcun target predefinito. Windows decide se mostrare l'icona direttamente o nell'area delle icone nascoste; SCAPING non cambia questa preferenza.
+Version 1.1.0 supports English and Italian. New installations initially use Italian. To select English, open **Configura IP** from the tray menu, choose **English** under **Lingua / Language**, and click **Applica**. The interface changes immediately and the setting is saved. In English, the same commands are **Configure IP** and **Apply**. Select **Italiano** to switch back.
 
-| Colore | Ultimo tentativo ICMP completato |
+During initial setup, you can save a language choice while the IP field is still empty; the icon stays gray and no target is contacted. Once an IP has been configured, a valid IPv4 address is required when applying settings: clearing the target does not bypass validation.
+
+Each scan keeps the language and target selected when it started. Changing the interface language does not translate output already collected or change the language of a running scan. External Nmap output, banners, service names, protocol tokens, and other received data are never machine-translated.
+
+## Tray and monitoring
+
+At first launch, the square is gray and its tooltip reports that the IP is not configured (**IP non configurato** with the initial Italian setting). There is no default network target. Windows controls whether the icon appears directly in the tray or in its hidden-icons area; SCAPING does not change that preference.
+
+| Color | Last completed ICMP attempt |
 | --- | --- |
-| Verde | Risposta valida, RTT inferiore alla soglia |
-| Arancione | Risposta valida, RTT uguale o superiore alla soglia |
-| Rosso | Ping KO: timeout, risposta negativa o errore; non prova che il sistema sia spento |
-| Grigio | IP assente, primo risultato in attesa o monitoraggio reinizializzato |
+| Green | Valid reply with an RTT below the slow-ping threshold |
+| Orange | Valid reply with an RTT at or above the threshold |
+| Red | Ping failed: timeout, negative ICMP reply, or another error; this does not prove the system is powered off |
+| Gray | No IP configured, awaiting the first result, or monitoring being reinitialized |
 
-Clic destro: **Chiudi**, **Configura IP**, **Scansiona TUTTE le porte**. Doppio clic sinistro: configurazione. Un secondo avvio richiama l'istanza della stessa sessione utente. La chiusura delle finestre non termina il monitoraggio; **Chiudi** nella tray termina anche le attività possedute. L'icona viene ripristinata dopo il riavvio di Explorer.
+The English right-click menu contains **Exit**, **Configure IP**, and **Scan ALL ports**. The Italian menu contains **Chiudi**, **Configura IP**, and **Scansiona TUTTE le porte**. Double-click the icon with the left mouse button to open settings. A second launch brings forward the existing instance in the same user session. Closing a settings or results window keeps monitoring active; **Exit** also stops the application's owned work. The icon is restored after Explorer restarts.
 
-Il ping usa `IcmpSendEcho2` asincrono, senza `ping.exe`. Un solo tentativo può essere in corso. Ogni configurazione ha una generazione: una risposta relativa alla generazione precedente non aggiorna il colore. Il cambio IP e la ripresa riavviano il monitoraggio. I risultati ping restano in memoria, senza scritture a ogni tentativo.
+Pings use asynchronous `IcmpSendEcho2`, without running `ping.exe`. Only one attempt can be outstanding. Each configuration change starts a new generation, so a reply from a previous generation cannot update the color. Changing the IP or resuming monitoring restarts the cycle. Ping results remain in memory, with no disk write for each attempt.
 
-## Configurazione
+## Configuration
 
-IPv4 numerico singolo obbligatorio, per esempio il loopback `127.0.0.1` per un test sul proprio PC. URL, hostname, CIDR, liste, intervalli e argomenti non sono ammessi. Non è implementato IPv6.
+A single numeric IPv4 address is required, such as `127.0.0.1` for a test on your own PC. URLs, hostnames, CIDR notation, lists, ranges, and command arguments are rejected. IPv6 is not implemented.
 
-Valori iniziali: intervallo 1000 ms, timeout 800 ms, soglia lenta 150 ms, avvio con Windows disattivato. La soglia deve essere inferiore al timeout. I limiti avanzati consentono di regolare concorrenza TCP e frequenza delle nuove connessioni, inizialmente 64 e 128 al secondo.
+Initial values are a 1000 ms interval, an 800 ms timeout, a 150 ms slow-ping threshold, and startup with Windows disabled. The threshold must be lower than the timeout. Advanced settings control concurrent TCP connections and the rate at which new connections start, initially 64 and 128 per second.
 
-Configurazione locale versionata in `D:\scaping\data\config.ini`, salvata atomicamente. Un file non valido viene segnalato e non produce traffico verso valori non validati. L'avvio automatico è per il solo utente corrente, mediante la chiave Run di HKCU; è reversibile dalla stessa finestra e non richiede elevazione. L'esempio in `resources\config.example.ini` non contiene un target.
+Local configuration is saved atomically to `D:\scaping\data\config.ini`. Schema version 2 includes `language=it` or `language=en`. Existing version 1 files are loaded as Italian with their target and other settings preserved; migration takes place in memory and the next successful save writes version 2. Invalid files are reported and do not cause traffic to an unvalidated target.
 
-Lasciare vuoto **Percorso Nmap** per il rilevamento nelle directory di installazione; è disponibile la selezione manuale. L'app non cerca alla cieca un `nmap.exe` nella working directory o nel PATH.
+Startup with Windows uses the current user's HKCU Run key. It can be reversed from the same settings window and does not require elevation. The example in `resources\config.example.ini` contains no target.
 
-## Scansione completa e limiti
+Leave the Nmap path field empty to use installation-directory detection, or select the executable manually. The application does not blindly select an `nmap.exe` from the working directory or PATH.
 
-Usare la scansione solo su sistemi che si è autorizzati a verificare. Ogni avvio è manuale e mantiene un'istantanea dell'IP: cambiare l'IP monitorato non reindirizza una scansione in corso. Un solo lavoro può essere attivo; clic successivi riportano in primo piano i risultati.
+## Full scanning and limitations
 
-**TUTTE** significa 65.536 porte TCP e 65.536 UDP, includendo 0 e 65535. Nmap esegue una fase TCP e una UDP, una alla volta, con questi profili fissi, più `-oX` su un percorso assoluto locale e l'IP validato:
+Scan only systems you are authorized to examine. Every scan starts on request and keeps a snapshot of its target and language. Changing the monitored IP does not redirect an active scan. Only one scan can run at a time; further clicks bring its results window forward.
+
+**ALL** means 65,536 TCP ports and 65,536 UDP ports, including both 0 and 65535. Nmap runs one TCP phase and one UDP phase, one at a time, with these fixed profiles, plus `-oX` with an absolute local output path and the validated IP:
 
 ```text
 TCP: -sT -n -Pn -p0-65535 -sV --version-light -T3 --reason --stats-every 2s
 UDP: -sU -n -Pn -p0-65535 -sV --version-light -T3 --reason --stats-every 2s
 ```
 
-`-Pn` consente la scansione anche quando il ping non risponde. `-sV` abilita il rilevamento di servizi/versioni; non vengono aggiunti script di vulnerabilità, brute force, `-A` o tentativi di autenticazione. La porta TCP 9100 rientra nella scansione porte, ma restano attive le esclusioni delle sonde di versione di Nmap per evitare stampe indesiderate: SCAPING non passa `--allports`.
+`-Pn` allows scanning even when the target does not answer pings. `-sV` enables service/version detection. SCAPING adds no vulnerability scripts, brute force, `-A`, or authentication attempts. TCP port 9100 remains in the port scan, while Nmap's standard version-probe exclusions remain active to avoid unwanted printing. SCAPING does not pass `--allports`.
 
-Gli stati `open`, `closed`, `filtered` e `open|filtered` restano distinti. **Il silenzio UDP non significa porta chiusa**. Il rate limiting ICMP può rendere una scansione UDP completa molto lunga. Non viene garantita una durata e non si riducono di nascosto le porte o le fasi.
+The states `open`, `closed`, `filtered`, and `open|filtered` remain distinct. **UDP silence does not mean a port is closed.** ICMP rate limiting can make a full UDP scan take a long time. No duration is guaranteed, and the application does not silently reduce the port range or omit phases.
 
-Copertura del port scanning e completamento del rilevamento servizi sono riportati separatamente. Una fase non eseguita, un errore o un annullamento producono un risultato **parziale**. Un risultato completo può comunque contenere stati incerti e servizi non identificati.
+Port-scan coverage and service-detection completion are reported separately. A missing phase, an error, or cancellation produces a **partial** result. A complete scan can still contain uncertain states and unidentified services.
 
-Servizio, prodotto, versione e informazioni extra provengono dall'XML Nmap; un nome convenzionale da tabella è distinto da un'identificazione basata sulla risposta. Un fingerprint Nmap non viene presentato come banner. Quando un dato non è disponibile, viene indicato come non identificato/non disponibile.
+Service, product, version, and extra information come from Nmap XML. A conventional name from a port table is distinguished from identification based on a response. Nmap fingerprints are not presented as banners. Missing information is reported as unidentified or unavailable.
 
-### Nmap assente: fallback TCP
+### Nmap unavailable: native TCP fallback
 
-Il ping continua normalmente. La scansione usa **Solo TCP — modalità ridotta**: Winsock non bloccante, concorrenza e velocità limitate, timeout distinti dagli errori locali. Il timeout di connessione TCP è almeno 3000 ms; se il timeout configurato è superiore viene usato quel valore. Questo evita che un rifiuto ritardato dallo stack Windows diventi prematuramente un esito incerto. Il timeout del ping resta quello configurato, inizialmente 800 ms. Il report indica il timeout TCP effettivo. Anche il fallback percorre 0..65535 con un contatore di almeno 32 bit. Non crea un thread per porta.
+Ping monitoring continues normally. Scanning uses **TCP only — reduced mode**: nonblocking Winsock connections, bounded concurrency and start rate, and timeout results distinguished from local errors. The TCP connection timeout is at least 3000 ms; a higher configured timeout takes precedence. This gives the Windows stack time to report a delayed refusal instead of prematurely recording an uncertain result. The ping timeout remains the configured value, initially 800 ms. Reports show the effective TCP timeout. The fallback also traverses 0..65535 using a counter of at least 32 bits. It does not create one thread per port.
 
-Sulle porte aperte viene tentata solo una lettura passiva del banner, al massimo 2048 byte e 300 ms; i byte non testuali sono rappresentati con escape. Non vengono inviate sonde applicative e non si simula il database Nmap. Un timeout resta incerto; errori locali non sono presentati come porte chiuse. Non esiste un falso fallback UDP: la copertura complessiva è dichiarata parziale.
+On open ports, it attempts only a passive banner read, bounded to 2048 bytes and 300 ms. Nontext bytes are escaped. It sends no application probes and does not imitate Nmap's identification database. A timeout remains uncertain, and local errors are not reported as closed ports. There is no UDP fallback; overall coverage is explicitly partial.
 
-### Risultati, annullamento e report
+### Results, cancellation, and reports
 
-La finestra ridimensionabile contiene una textbox monospaziata multilinea, selezionabile e read-only, con scrollbar, più **Annulla scansione**, **Copia**, **Salva report**, **Chiudi finestra**. Output e fase si aggiornano a blocchi, con indicatore indeterminato quando manca una percentuale attendibile.
+The resizable results window contains a read-only, selectable, monospaced multiline text box with scrollbars, plus **Cancel scan**, **Copy**, **Save report**, and **Close window**. Output and phase information update in batches. An indeterminate progress indicator is used when no reliable percentage is available.
 
-Il buffer UI è limitato; l'output completo viene conservato localmente in `data`. Stdout e stderr sono acquisiti senza bloccare il figlio. L'XML costituisce la fonte strutturata dei risultati ed è trattato come input non attendibile: dimensione limitata, parser senza entità esterne/rete, caratteri di controllo neutralizzati. I report possono contenere dati di rete sensibili e sono esclusi da Git.
+The visible text buffer is bounded; complete output is retained locally under `data`. Stdout and stderr are captured without blocking the child process. XML provides the structured results and is treated as untrusted input: bounded size, no external entity or network resolution, and control characters neutralized for display. Reports may contain sensitive network information and are excluded from Git.
 
-Chiudere la finestra la nasconde. **Annulla scansione** ferma il lavoro reale e conserva quanto già acquisito. I processi di scansione appartengono a Job Objects con cleanup alla chiusura; il worker temporaneo non diventa un servizio.
+Closing the results window hides it. **Cancel scan** stops the actual work and preserves output already collected. Scan processes belong to Job Objects that clean up owned processes on closure; the temporary worker does not become a service.
 
-## Privilegi e dipendenze esterne
+## Privileges and external dependencies
 
-Monitoraggio e UI funzionano senza amministratore. Nmap e Npcap sono opzionali per il ping e necessari, con i relativi permessi, per la scansione completa. Installazione, licenze e vincoli del worker sono descritti in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) e [docs/SECURITY.md](docs/SECURITY.md).
+The interface and ping monitor run without administrator privileges. Nmap and Npcap are optional for ping monitoring and required, with suitable permissions, for full scanning. Installation, licensing, and worker restrictions are described in [Dependencies](docs/DEPENDENCIES.md) and [Security](docs/SECURITY.md).
 
-SCAPING non installa driver, non cambia firewall/antivirus e non modifica servizi o impostazioni globali. Se Npcap manca o i permessi non consentono UDP, l'app mantiene il ping e indica la capacità mancante. L'elevazione riguarda solo un worker temporaneo a profili fissi; un rifiuto UAC non termina il monitoraggio.
+SCAPING installs no drivers, changes no firewall or antivirus settings, and modifies no services or global settings. If Npcap is unavailable or permissions prevent UDP scanning, ping monitoring continues and the missing capability is reported. Elevation applies only to a temporary worker with fixed profiles; declining UAC does not stop the ping monitor.
 
-## Test e privacy
+## Testing and privacy
 
-Test deterministici per IPv4, colori su risultati simulati, configurazione, intervallo completo delle porte, quoting, XML ostile/incompleto; prove reali limitate al loopback e listener controllati. Consultare il registro di verifica per sapere quali prove sono state effettivamente eseguite.
+The automated tests cover IPv4 validation, colors from simulated ICMP results, configuration, the full port range, argument quoting, and hostile or incomplete XML. Real network tests are limited to loopback and controlled listeners. Consult the [verification record](docs/VERIFICATION.md) to distinguish tests actually run from those still outstanding. Recorded version 1.0.0 measurements are historical baseline results, not measurements of version 1.1.0.
 
-`scripts\measure.ps1 -ProcessId <PID> -Seconds 60` misura CPU normalizzata sul totale macchina e private bytes del solo residente. Le misure sono salvate in `data` e non includono processi Nmap.
+`scripts\measure.ps1 -ProcessId <PID> -Seconds 60` measures CPU usage normalized across the whole machine and the resident process's private bytes. Measurement files remain under `data` and exclude Nmap processes.
 
-Sorgenti, test e documentazione usano dati sintetici. `data`, `build`, `dist`, configurazioni reali, output Nmap, log, credenziali e metadati personali non vengono pubblicati. Nmap e Npcap non sono ridistribuiti.
+Source, tests, and documentation use synthetic data. Local `data`, `build`, and `dist` folders, real settings, Nmap output, logs, credentials, and personal metadata are not published. Nmap and Npcap are not redistributed.

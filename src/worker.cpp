@@ -15,11 +15,11 @@
 namespace scaping::net {
 namespace {
 constexpr DWORD wireMagic = 0x53435032;
-constexpr DWORD wireVersion = 1;
+constexpr DWORD wireVersion = 2;
 constexpr DWORD textFrame = 1, xmlFrame = 2, finishFrame = 3;
 constexpr DWORD maxFrame = 65536;
 constexpr std::uint64_t maxXml = 64ULL * 1024 * 1024;
-struct Request { DWORD magic = wireMagic; DWORD version = wireVersion; DWORD protocol = 1; wchar_t ip[16]{}; };
+struct Request { DWORD magic = wireMagic; DWORD version = wireVersion; DWORD protocol = 1; DWORD language = 0; wchar_t ip[16]{}; };
 struct Frame { DWORD type = 0, bytes = 0; };
 struct Finish { DWORD exitCode = ERROR_GEN_FAILURE, error = 0, cancelled = 0; };
 
@@ -36,31 +36,33 @@ bool administrative_sid(PSID sid) {
 bool protected_object(const std::filesystem::path& path, std::wstring& diagnostic) {
     DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-        diagnostic = L"Percorso Nmap mancante o con reparse point: elevazione rifiutata."; return false;
+        diagnostic = tr(L"Percorso Nmap mancante o con reparse point: elevazione rifiutata.", L"Nmap path is missing or contains a reparse point: elevation refused."); return false;
     }
     PACL dacl = nullptr; PSID owner = nullptr; PSECURITY_DESCRIPTOR security = nullptr;
     DWORD result = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
         &owner, nullptr, &dacl, nullptr, &security);
-    if (result != ERROR_SUCCESS) { diagnostic = L"Impossibile verificare ACL Nmap: " + win_error(result); return false; }
+    if (result != ERROR_SUCCESS) { diagnostic = tr(L"Impossibile verificare ACL Nmap: ", L"Unable to verify Nmap ACLs: ") + win_error(result); return false; }
     struct Guard { PSECURITY_DESCRIPTOR p; ~Guard() { LocalFree(p); } } guard{security};
     if (!dacl || !administrative_sid(owner)) {
-        diagnostic = L"Proprietario o ACL Nmap non protetti da amministratori: elevazione rifiutata."; return false;
+        diagnostic = tr(L"Proprietario o ACL Nmap non protetti da amministratori: elevazione rifiutata.",
+            L"Nmap owner or ACLs are not protected by administrators: elevation refused."); return false;
     }
     constexpr ACCESS_MASK mutations = GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER |
         FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD;
     for (DWORD i = 0; i < dacl->AceCount; ++i) {
         void* raw = nullptr;
-        if (!GetAce(dacl, i, &raw)) { diagnostic = L"ACL Nmap non valida."; return false; }
+        if (!GetAce(dacl, i, &raw)) { diagnostic = tr(L"ACL Nmap non valida.", L"Invalid Nmap ACL."); return false; }
         const auto* header = static_cast<const ACE_HEADER*>(raw);
         if (header->AceFlags & INHERIT_ONLY_ACE) continue;
         if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
             const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw);
             if ((ace->Mask & mutations) && !administrative_sid(const_cast<DWORD*>(&ace->SidStart))) {
-                diagnostic = L"Installazione Nmap modificabile da utenti non amministratori: elevazione rifiutata."; return false;
+                diagnostic = tr(L"Installazione Nmap modificabile da utenti non amministratori: elevazione rifiutata.",
+                    L"Nmap installation is writable by non-administrators: elevation refused."); return false;
             }
         } else if (header->AceType != ACCESS_DENIED_ACE_TYPE && header->AceType != SYSTEM_AUDIT_ACE_TYPE) {
             // Complex conditional/object grants are conservatively rejected instead of approximated.
-            diagnostic = L"ACL Nmap complessa non verificabile: elevazione rifiutata."; return false;
+            diagnostic = tr(L"ACL Nmap complessa non verificabile: elevazione rifiutata.", L"Complex Nmap ACL cannot be verified: elevation refused."); return false;
         }
     }
     return true;
@@ -168,7 +170,8 @@ int serve_worker(DWORD parentPid, std::uint64_t created, std::wstring_view nonce
     if (!GetNamedPipeServerProcessId(pipe.value, &server) || server != parentPid) return ERROR_ACCESS_DENIED;
     Request request{};
     if (!transfer(pipe.value, false, &request, sizeof(request), nullptr, parent.value, 10000) || request.magic != wireMagic ||
-        request.version != wireVersion || request.protocol > 1 || request.ip[15] != L'\0' || !valid_ipv4(request.ip)) return ERROR_INVALID_DATA;
+        request.version != wireVersion || request.protocol > 1 || request.language > 1 || request.ip[15] != L'\0' || !valid_ipv4(request.ip)) return ERROR_INVALID_DATA;
+    ScopedLanguage language(request.language == 1 ? Language::English : Language::Italian);
     PrivateDirectory temporary;
     if (!temporary.create()) return ERROR_ACCESS_DENIED;
     std::filesystem::path executable;
@@ -178,7 +181,8 @@ int serve_worker(DWORD parentPid, std::uint64_t created, std::wstring_view nonce
         if (trusted_elevation_nmap(candidate, diagnostic)) { executable = candidate; break; }
     }
     if (executable.empty()) {
-        send_frame(pipe.value, textFrame, to_utf8(L"Worker UAC: installazione Nmap attendibile non disponibile. " + diagnostic + L"\r\n"), parent.value);
+        send_frame(pipe.value, textFrame, to_utf8(tr(L"Worker UAC: installazione Nmap attendibile non disponibile. ",
+            L"UAC worker: a trusted Nmap installation is unavailable. ") + diagnostic + L"\r\n"), parent.value);
         Finish finished{ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED, 0};
         send_frame(pipe.value, finishFrame, std::string_view(reinterpret_cast<const char*>(&finished), sizeof(finished)), parent.value);
         return ERROR_ACCESS_DENIED;
@@ -200,7 +204,9 @@ int serve_worker(DWORD parentPid, std::uint64_t created, std::wstring_view nonce
         return ERROR_BAD_EXE_FORMAT;
     }
     const Protocol protocol = request.protocol == 0 ? Protocol::Tcp : Protocol::Udp;
-    if (!send_frame(pipe.value, textFrame, std::string("Worker UAC temporaneo; profilo ") + (protocol == Protocol::Tcp ? "TCP" : "UDP") + " completo fisso.\r\n" + version, parent.value)) return ERROR_CANCELLED;
+    const std::wstring profile = protocol == Protocol::Tcp ? L"TCP" : L"UDP";
+    if (!send_frame(pipe.value, textFrame, to_utf8(tr(L"Worker UAC temporaneo; profilo ", L"Temporary UAC worker; fixed full ") + profile +
+        tr(L" completo fisso.\r\n", L" profile.\r\n")) + version, parent.value)) return ERROR_CANCELLED;
     auto result = run_process(executable, nmap_arguments(protocol, request.ip, temporary.xml), temporary.path, nullptr,
         [&](std::string_view bytes) { return send_frame(pipe.value, textFrame, bytes, parent.value); }, INFINITE, parent.value, true, pipe.value);
     // XML is read from a worker-owned administrative directory, never from a caller-specified output path.
@@ -222,7 +228,7 @@ int serve_worker(DWORD parentPid, std::uint64_t created, std::wstring_view nonce
 bool trusted_elevation_nmap(const std::filesystem::path& path, std::wstring& diagnostic) {
     try {
         if (!path.is_absolute() || path.native().starts_with(L"\\\\") || _wcsicmp(path.filename().c_str(), L"nmap.exe")) {
-            diagnostic = L"Il worker accetta soltanto l'installazione Nmap locale prevista."; return false;
+            diagnostic = tr(L"Il worker accetta soltanto l'installazione Nmap locale prevista.", L"The worker accepts only the designated local Nmap installation."); return false;
         }
         std::filesystem::path root;
         for (const auto& candidate : trusted_roots()) {
@@ -230,7 +236,7 @@ bool trusted_elevation_nmap(const std::filesystem::path& path, std::wstring& dia
             auto expected = candidate / L"Nmap" / L"nmap.exe";
             if (_wcsicmp(path.lexically_normal().c_str(), expected.lexically_normal().c_str()) == 0) { root = candidate; break; }
         }
-        if (root.empty()) { diagnostic = L"Il worker eleva soltanto Nmap installato in Program Files\\Nmap."; return false; }
+        if (root.empty()) { diagnostic = tr(L"Il worker eleva soltanto Nmap installato in Program Files\\Nmap.", L"The worker elevates only Nmap installed in Program Files\\Nmap."); return false; }
         if (!protected_object(root, diagnostic) || !protected_object(root / L"Nmap", diagnostic) || !protected_object(path, diagnostic)) return false;
         DWORD count = 0;
         for (const auto& item : std::filesystem::recursive_directory_iterator(root / L"Nmap")) {
@@ -246,11 +252,14 @@ bool trusted_elevation_nmap(const std::filesystem::path& path, std::wstring& dia
         LONG signedStatus = WinVerifyTrust(nullptr, &policy, &trust);
         trust.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(nullptr, &policy, &trust);
         if (signedStatus != ERROR_SUCCESS && signedStatus != TRUST_E_NOSIGNATURE) {
-            diagnostic = L"Firma Nmap presente ma non verificabile o non valida: elevazione rifiutata."; return false;
+            diagnostic = tr(L"Firma Nmap presente ma non verificabile o non valida: elevazione rifiutata.",
+                L"Nmap signature is present but invalid or unverifiable: elevation refused."); return false;
         }
-        diagnostic = signedStatus == ERROR_SUCCESS ? L"Nmap con firma verificata e installazione protetta." : L"Nmap non firmato; attendibilità basata su installazione amministrativa interamente protetta da ACL.";
+        diagnostic = signedStatus == ERROR_SUCCESS ? tr(L"Nmap con firma verificata e installazione protetta.", L"Nmap signature verified and installation protected.") :
+            tr(L"Nmap non firmato; attendibilità basata su installazione amministrativa interamente protetta da ACL.",
+                L"Nmap is unsigned; trust is based on an administrator-installed tree entirely protected by ACLs.");
         return true;
-    } catch (...) { diagnostic = L"Impossibile verificare l'installazione protetta Nmap."; return false; }
+    } catch (...) { diagnostic = tr(L"Impossibile verificare l'installazione protetta Nmap.", L"Unable to verify the protected Nmap installation."); return false; }
 }
 
 ProcessResult run_elevated_nmap(Protocol protocol, std::wstring_view ip, const std::filesystem::path& expectedNmap,
@@ -259,7 +268,8 @@ ProcessResult run_elevated_nmap(Protocol protocol, std::wstring_view ip, const s
     std::wstring diagnostic;
     if ((protocol != Protocol::Tcp && protocol != Protocol::Udp) || !valid_ipv4(ip) || !trusted_elevation_nmap(expectedNmap, diagnostic)) {
         result.error = ERROR_ACCESS_DENIED;
-        if (output) output(to_utf8(L"Elevazione rifiutata: " + diagnostic + L"\r\n")); return result;
+        if (diagnostic.empty()) diagnostic = tr(L"Richiesta di scansione privilegiata non valida.", L"Invalid privileged scan request.");
+        if (output) output(to_utf8(tr(L"Elevazione rifiutata: ", L"Elevation refused: ") + diagnostic + L"\r\n")); return result;
     }
     // Ensure the worker's automatic fixed installation selection is the same one used by the parent.
     std::filesystem::path selected;
@@ -302,7 +312,9 @@ ProcessResult run_elevated_nmap(Protocol protocol, std::wstring_view ip, const s
     if (!launchState->ready) { result.error = GetLastError(); return result; }
     // Consent can stay on the secure desktop indefinitely. This transient thread owns all of its state;
     // closing the GUI or cancelling the scan does not have to wait for the user's answer to UAC.
-    std::thread([launchState, ownPath, parameters] {
+    const Language launchLanguage = current_language();
+    std::thread([launchState, ownPath, parameters, launchLanguage] {
+        ScopedLanguage language(launchLanguage);
         HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         SHELLEXECUTEINFOW launch{}; launch.cbSize = sizeof(launch);
         launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
@@ -322,7 +334,8 @@ ProcessResult run_elevated_nmap(Protocol protocol, std::wstring_view ip, const s
     }
     if (launchState->error) {
         result.error = launchState->error; result.cancelled = result.error == ERROR_CANCELLED;
-        if (output) output(to_utf8(L"UAC non accordata o worker non avviato: " + win_error(result.error) + L". UDP parziale.\r\n"));
+        if (output) output(to_utf8(tr(L"UAC non accordata o worker non avviato: ", L"UAC was not granted or the worker did not start: ") +
+            win_error(result.error) + tr(L". Scansione parziale.\r\n", L". Partial scan.\r\n")));
         return result;
     }
     Handle worker(launchState->process.release());
@@ -344,7 +357,9 @@ ProcessResult run_elevated_nmap(Protocol protocol, std::wstring_view ip, const s
     connectionGuard.pending = false;
     ULONG clientPid = 0;
     if (!GetNamedPipeClientProcessId(pipe.value, &clientPid) || clientPid != GetProcessId(worker.value)) { result.error = ERROR_ACCESS_DENIED; return result; }
-    Request request; request.protocol = protocol == Protocol::Tcp ? 0 : 1; wcsncpy_s(request.ip, std::wstring(ip).c_str(), _TRUNCATE);
+    Request request; request.protocol = protocol == Protocol::Tcp ? 0 : 1;
+    request.language = current_language() == Language::English ? 1 : 0;
+    wcsncpy_s(request.ip, std::wstring(ip).c_str(), _TRUNCATE);
     if (!transfer(pipe.value, true, &request, sizeof(request), cancel, worker.value, 10000)) {
         result.error = ERROR_BROKEN_PIPE; result.cancelled = cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0; return result;
     }

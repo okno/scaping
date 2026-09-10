@@ -7,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 int checks = 0;
@@ -106,6 +107,62 @@ void test_config(const std::filesystem::path& temporary) {
     require(scaping::save_config(file, config, error) && scaping::load_config(file).valid, "initial blank config roundtrip");
     require(!scaping::save_config(L"relative.ini", config, error), "relative config output accepted");
 }
+void test_localization(const std::filesystem::path& temporary) {
+    using scaping::Language;
+    const auto originalLanguage = scaping::current_language();
+    const auto file = temporary / L"language.ini";
+    const std::string legacy = "[scaping]\nversion=1\nip=192.0.2.42\ninterval_ms=2345\ntimeout_ms=987\nslow_ms=321\nauto_start=1\nnmap_path=D:\\synthetic\\nmap.exe\nconcurrency=47\nconnections_per_second=91\n";
+    write(file, legacy);
+    auto loaded = scaping::load_config(file);
+    require(loaded.valid && loaded.config.language == Language::Italian, "legacy config language migration");
+    require(loaded.config.ip == L"192.0.2.42" && loaded.config.intervalMs == 2345 && loaded.config.timeoutMs == 987 && loaded.config.slowMs == 321 && loaded.config.autoStart && loaded.config.nmapPath == L"D:\\synthetic\\nmap.exe" && loaded.config.concurrency == 47 && loaded.config.connectionsPerSecond == 91, "legacy migration changed user settings");
+    {
+        std::ifstream unchanged(file, std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(unchanged)), std::istreambuf_iterator<char>());
+        require(bytes == legacy, "reading a legacy configuration rewrote it");
+    }
+    std::wstring error;
+    auto config = loaded.config;
+    config.language = Language::English;
+    require(scaping::save_config(file, config, error), "save English configuration");
+    loaded = scaping::load_config(file);
+    require(loaded.valid && loaded.config.language == Language::English && loaded.config.ip == config.ip && loaded.config.timeoutMs == config.timeoutMs, "English configuration roundtrip lost settings");
+    std::ifstream saved(file, std::ios::binary);
+    const std::string english((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+    saved.close();
+    require(english.find("version=2\r\n") != std::string::npos && english.find("language=en\r\n") != std::string::npos, "language schema is not versioned");
+    for (const auto* language : {"fr", "EN", "", "en;anything", "en\r\nlanguage=it"}) {
+        auto invalid = english;
+        invalid.replace(invalid.find("language=en"), std::string("language=en").size(), std::string("language=") + language);
+        write(file, invalid);
+        require(!scaping::load_config(file).valid, "invalid language value accepted");
+    }
+    auto missing = english;
+    missing.erase(missing.find("language=en\r\n"), std::string("language=en\r\n").size());
+    write(file, missing);
+    require(!scaping::load_config(file).valid, "v2 configuration without language accepted");
+    write(file, legacy + "language=en\n");
+    require(!scaping::load_config(file).valid, "v1 configuration accepted unexpected language field");
+    config.language = static_cast<Language>(99);
+    require(scaping::validate_config(config).has_value(), "invalid language enum accepted");
+    for (auto language : {Language::Italian, Language::English}) {
+        const scaping::ScopedLanguage scope(language);
+        scaping::Config invalid;
+        const auto message = scaping::validate_config(invalid);
+        require(message && message->find(language == Language::English ? L"Enter a valid numeric IPv4" : L"Inserire un IPv4 numerico valido") != std::wstring::npos, "validation did not use selected language");
+        const auto xmlError = scaping::parse_nmap_xml(temporary / L"missing.xml", scaping::Protocol::Udp);
+        require(xmlError.diagnostic.find(language == Language::English ? L"XML missing" : L"XML assente") != std::wstring::npos, "XML diagnostic did not use selected language");
+        invalid.language = language;
+        require(scaping::save_config(file, invalid, error) && scaping::load_config(file).config.language == language, "language selection before entering an IP failed");
+    }
+    require(scaping::current_language() == originalLanguage, "language scope did not restore caller");
+    std::array<std::wstring, 2> messages;
+    std::thread italian([&] { const scaping::ScopedLanguage scope(Language::Italian); messages[0] = *scaping::validate_config(scaping::Config{}); });
+    std::thread englishThread([&] { const scaping::ScopedLanguage scope(Language::English); messages[1] = *scaping::validate_config(scaping::Config{}); });
+    italian.join(); englishThread.join();
+    require(messages[0].find(L"Inserire") != std::wstring::npos && messages[1].find(L"Enter") != std::wstring::npos, "concurrent workers leaked language");
+    require(scaping::current_language() == originalLanguage, "worker language changed the caller");
+}
 void test_text_and_arguments(const std::filesystem::path& temporary) {
     const std::wstring sample = L"Configurazione: unita \u00e8 \u00fc \u03a9 \U0001f600";
     require(scaping::from_utf8(scaping::to_utf8(sample)) == sample, "UTF-8 roundtrip");
@@ -136,7 +193,8 @@ void test_text_and_arguments(const std::filesystem::path& temporary) {
     require(scaping::nmap_arguments(scaping::Protocol::Tcp, L"192.0.2.1", L"relative.xml").empty(), "relative XML accepted");
     scaping::PortResult port; port.port = 65535; port.state = L"open|filtered"; port.service = L"synthetic\r\nFAKE";
     auto line = scaping::format_port(port);
-    require(line.find(L"open|filtered") != std::wstring::npos && line.find(L"nome convenzionale") != std::wstring::npos && line.find(L"non disponibile") != std::wstring::npos, "format missing uncertainty or origin");
+    const bool english = scaping::current_language() == scaping::Language::English;
+    require(line.find(L"open|filtered") != std::wstring::npos && line.find(english ? L"conventional port name" : L"nome convenzionale") != std::wstring::npos && line.find(english ? L"not available" : L"non disponibile") != std::wstring::npos, "format missing uncertainty or origin");
     require(line.find(L"\r\nFAKE") == std::wstring::npos, "field newline injection");
 }
 void test_xml(const std::filesystem::path& temporary) {
@@ -209,7 +267,9 @@ void test_xml(const std::filesystem::path& temporary) {
 }
 }
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--language=en") scaping::set_language(scaping::Language::English);
+    else if (argc != 1) return 2;
     wchar_t base[MAX_PATH]{};
     if (!GetTempPathW(MAX_PATH, base)) return 2;
     const auto temporary = std::filesystem::path(base) / (L"scaping-synthetic-tests-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
@@ -217,7 +277,7 @@ int wmain() {
     try {
         ownedDirectory = std::filesystem::create_directory(temporary);
         require(ownedDirectory, "unique test directory creation");
-        test_ipv4(); test_colors(); test_config(temporary); test_text_and_arguments(temporary); test_xml(temporary);
+        test_ipv4(); test_colors(); test_config(temporary); test_localization(temporary); test_text_and_arguments(temporary); test_xml(temporary);
         std::cout << "Core checks passed: " << checks << "\n";
         std::filesystem::remove_all(temporary);
         return 0;
